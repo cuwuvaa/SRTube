@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$remote_ref" = refs/heads/main ]; then
+        echo "Push to main is blocked locally. Use a pull request after CI passes." >&2
+        exit 1
+    fi
+done

@@ -1,0 +1,32 @@
+services:
+  bot:
+    environment:
+      YOUTUBE_POT_PROVIDER_URL: http://pot-provider:4416
+      YOUTUBE_PLAYER_CLIENTS: mweb,tv,web_safari
+    depends_on:
+      pot-provider:
+        condition: service_healthy
+  pot-provider:
+    # Not part of the default audited release. Require a separately scanned immutable image.
+    image: ${SRTUBE_POT_IMAGE:?Set separately audited provider image by sha256 digest}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: "0.10"
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 48
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4416/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"

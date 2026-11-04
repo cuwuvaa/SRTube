@@ -1,0 +1,28 @@
+# Опциональное дополнение: docker compose -f compose.yaml -f compose.youtube.yaml up -d --build
+services:
+  bot:
+    environment:
+      YOUTUBE_POT_PROVIDER_URL: http://pot-provider:4416
+      YOUTUBE_PLAYER_CLIENTS: mweb,tv,web_safari
+    depends_on:
+      pot-provider:
+        condition: service_healthy
+
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2
+    restart: unless-stopped
+    init: true
+    # Доступ только во внутренней сети Compose, без публикации порта на сервере.
+    expose:
+      - "4416"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4416/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

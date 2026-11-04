@@ -1,0 +1,29 @@
+name: Build and verify image
+description: Build one native image and verify functionality, isolation and known CVEs
+runs:
+  using: composite
+  steps:
+    - name: Build once on native architecture
+      shell: bash
+      run: docker build --pull --build-arg REVISION="$GITHUB_SHA" -t srtube:ci .
+    - name: Offline image checks
+      shell: bash
+      run: |
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 1 --tmpfs /tmp:rw,noexec,nosuid,size=128m --tmpfs /app/data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=700 srtube:ci python -m srtube --check
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 0.55 --tmpfs /tmp:rw,noexec,nosuid,size=128m srtube:ci python -m srtube.selftest
+    - name: Verify production boundaries
+      shell: bash
+      run: python3 scripts/container_smoke.py --image srtube:ci
+    - name: Verify the scoped SQLite CLI finding is not applicable
+      shell: bash
+      run: |
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 128m srtube:ci python -c 'import ctypes, shutil; assert shutil.which("sqlite3") is None, "Remove SQLite CVE exception: CLI is installed"; assert not hasattr(ctypes.CDLL("libsqlite3.so.0"), "sqlite3_recover_init"), "Remove SQLite CVE exception: recovery API is present"'
+    - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+      with:
+        config: .grype.yaml
+        image: srtube:ci
+        grype-version: v0.121.1
+        fail-build: true
+        severity-cutoff: high
+        only-fixed: false
+        output-format: table
