@@ -2,8 +2,9 @@ FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf56
 FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS audio
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gpg gpg-agent xz lame-dev opus-dev
+RUN apk add --no-cache gnutar
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
-RUN curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+RUN curl --retry 2 --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
     && curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
     && curl -fsSLo release-key.asc https://ffmpeg.org/ffmpeg-devel.asc \
     && echo '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  ffmpeg-9.0.2.tar.xz' | sha256sum -c - \
@@ -11,6 +12,7 @@ RUN curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
     && gpg --batch --homedir /build/keyring --import release-key.asc \
     && test "$(gpg --batch --homedir /build/keyring --with-colons --list-keys | awk -F: '$1=="fpr" {print $10; exit}')" = FCF986EA15E6E293A5644F10B4322F04D67658D8 \
     && gpg --batch --homedir /build/keyring --verify ffmpeg-9.0.2.tar.xz.asc ffmpeg-9.0.2.tar.xz \
+    && gpgconf --homedir /build/keyring --kill gpg-agent \
     && tar -xf ffmpeg-9.0.2.tar.xz --strip-components=1
 RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
       --disable-debug --disable-doc --disable-network --disable-ffplay --disable-avdevice \
