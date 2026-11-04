@@ -69,8 +69,18 @@ async def run_process(
         for reader in readers:
             reader.cancel()
         await asyncio.gather(*readers, return_exceptions=True)
-        # Drain paused pipe transports after killing the producer, or wait() can deadlock.
-        await process.communicate()
+
+        # Drain without collecting output. Bound cleanup even if an escaped descendant holds a pipe.
+        async def discard(reader):
+            if reader is not None:
+                while await reader.read(65536):
+                    pass
+
+        try:
+            async with asyncio.timeout(5):
+                await asyncio.gather(discard(process.stdout), discard(process.stderr), process.wait())
+        except TimeoutError:
+            pass
         if isinstance(exc, asyncio.CancelledError):
             raise
         if isinstance(exc, TimeoutError):

@@ -1,9 +1,7 @@
-FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS javascript
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
-FROM python:3.12-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS audio
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS audio
 WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config nasm curl gnupg xz-utils ca-certificates libmp3lame-dev libopus-dev
+RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gnupg xz lame-dev opus-dev
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
 RUN curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
     && curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
@@ -28,7 +26,7 @@ RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
       --extra-ldflags='-Wl,-z,relro,-z,now -Wl,-z,noexecstack' \
     && make -j2 && make install \
     && mkdir -p /opt/audio/licenses && cp COPYING.LGPLv2.1 /opt/audio/licenses/
-FROM python:3.12-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 ARG REVISION=local
@@ -36,20 +34,16 @@ ENV SRTUBE_REVISION=$REVISION
 LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends libmp3lame0 libopus0 ca-certificates \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 srtube
+RUN apk upgrade --no-cache && apk add --no-cache python-3.12 nodejs-24 lame opus ca-certificates \
+    && addgroup -g 10001 srtube && adduser -D -u 10001 -G srtube srtube
 COPY --from=uv /uv /usr/local/bin/uv
-COPY --from=javascript /usr/local/bin/node /usr/local/bin/node
 COPY --from=audio /opt/audio/bin/ffmpeg /opt/audio/bin/ffprobe /usr/local/bin/
 COPY --from=audio /opt/audio/licenses /usr/local/share/licenses/ffmpeg
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable \
-    && python -m pip uninstall -y pip \
+RUN uv sync --frozen --no-dev --no-editable --python /usr/bin/python3.12 --no-python-downloads \
     && rm -f /usr/local/bin/uv \
-    && rm -rf /root/.cache /usr/local/lib/python3.12/ensurepip \
+    && rm -rf /root/.cache \
     && mkdir -p /app/data /app/state /app/tracks /run/srtube \
     && chown srtube:srtube /app/data /app/state /app/tracks /run/srtube \
     && chmod 700 /app/data /app/state /app/tracks /run/srtube

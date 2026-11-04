@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -42,6 +42,28 @@ jobs:
 
   image:
     needs: checks
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-image
+
+  release-image:
+    needs: checks
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
@@ -59,22 +81,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Build once on native architecture
-        run: docker build --pull --build-arg REVISION="$GITHUB_SHA" -t srtube:ci .
-      - name: Offline image check
-        run: |
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 1 --tmpfs /tmp:rw,noexec,nosuid,size=128m --tmpfs /app/data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=700 srtube:ci python -m srtube --check
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 0.55 --tmpfs /tmp:rw,noexec,nosuid,size=128m srtube:ci python -m srtube.selftest
-      - name: Test production isolation and Unix socket between containers
-        run: python3 scripts/container_smoke.py --image srtube:ci
-      - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
-        with:
-          image: srtube:ci
-          grype-version: v0.121.1
-          fail-build: true
-          severity-cutoff: high
-          only-fixed: false
-          output-format: table
+      - uses: ./.github/actions/build-image
       - name: Publish the scanned architecture by digest
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
@@ -96,7 +103,7 @@ jobs:
 
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: image
+    needs: release-image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

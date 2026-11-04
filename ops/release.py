@@ -119,7 +119,16 @@ def deploy(root: Path, release: dict, rollback: bool = False) -> None:
     for index, entry in enumerate(reversed(history["releases"][-2:])):
         name = ("current", "previous")[index]
         run("docker", "image", "tag", entry["image"], f"srtube-retain:{name}")
-    run("docker", "image", "prune", "--force", "--filter", "until=168h")
+    run(
+        "docker",
+        "image",
+        "prune",
+        "--force",
+        "--filter",
+        "until=168h",
+        "--filter",
+        f"label=org.opencontainers.image.source=https://github.com/{REPOSITORY}",
+    )
 
 
 def candidate() -> dict | None:
@@ -135,7 +144,11 @@ def candidate() -> dict | None:
         )
     )
     for item in runs["workflow_runs"]:
-        if item["head_sha"] == head and item["head_repository"]["full_name"].lower() == REPOSITORY.lower():
+        if (
+            item["head_sha"] == head
+            and item.get("event") in {"push", "workflow_dispatch"}
+            and item["head_repository"]["full_name"].lower() == REPOSITORY.lower()
+        ):
             with tempfile.TemporaryDirectory(prefix="srtube-release-") as temporary:
                 run(
                     "gh",
