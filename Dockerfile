@@ -1,6 +1,6 @@
-FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS javascript
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS javascript
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
-FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337 AS audio
+FROM python:3.12-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30 AS audio
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config nasm curl gnupg xz-utils ca-certificates libmp3lame-dev libopus-dev
@@ -28,7 +28,7 @@ RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
       --extra-ldflags='-Wl,-z,relro,-z,now -Wl,-z,noexecstack' \
     && make -j2 && make install \
     && mkdir -p /opt/audio/licenses && cp COPYING.LGPLv2.1 /opt/audio/licenses/
-FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+FROM python:3.12-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 ARG REVISION=local
@@ -37,6 +37,7 @@ LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends libmp3lame0 libopus0 ca-certificates \
+    && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 srtube
 COPY --from=uv /uv /usr/local/bin/uv
@@ -46,7 +47,9 @@ COPY --from=audio /opt/audio/licenses /usr/local/share/licenses/ffmpeg
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
-    && rm -rf /root/.cache \
+    && python -m pip uninstall -y pip \
+    && rm -f /usr/local/bin/uv \
+    && rm -rf /root/.cache /usr/local/lib/python3.12/ensurepip \
     && mkdir -p /app/data /app/state /app/tracks /run/srtube \
     && chown srtube:srtube /app/data /app/state /app/tracks /run/srtube \
     && chmod 700 /app/data /app/state /app/tracks /run/srtube

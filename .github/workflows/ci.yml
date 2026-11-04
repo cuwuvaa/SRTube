@@ -65,6 +65,8 @@ jobs:
         run: |
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 1 --tmpfs /tmp:rw,noexec,nosuid,size=128m --tmpfs /app/data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=700 srtube:ci python -m srtube --check
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 96 --memory 512m --cpus 0.55 --tmpfs /tmp:rw,noexec,nosuid,size=128m srtube:ci python -m srtube.selftest
+      - name: Test production isolation and Unix socket between containers
+        run: python3 scripts/container_smoke.py --image srtube:ci
       - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
         with:
           image: srtube:ci
