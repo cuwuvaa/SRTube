@@ -1,0 +1,13 @@
+# Reviewed 2026-11-05. See docs/security.md, "SQLite CLI".
+# Exact package/version only. CI asserts the CLI and recovery API are absent.
+ignore:
+  - vulnerability: CVE-2026-119586
+    package:
+      name: ^sqlite-libs$
+      type: apk
+      version: 3.54.1-r0
+    reason: >-
+      Vulnerable SQLite CLI .recover code is not present in this image.
+      Only libsqlite3 is installed; no sqlite3 executable or recovery API.
+      Backup uses Python Connection.backup, never a recover/restore shell pipe.
+      Evidence: https://abraxaslabs.tech/research/sqlite-cli-recover
