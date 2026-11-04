@@ -164,3 +164,18 @@ def test_first_failed_release_is_blocked(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="health checks"):
         ops.deploy(tmp_path, release)
     assert ops.state(tmp_path) == {"releases": [], "blocked": [release["sha"]]}
+
+
+def test_release_cleanup_only_removes_obsolete_srtube_digest(tmp_path, monkeypatch):
+    ops = load_ops()
+    releases = [
+        {"image": ops.IMAGE + "@sha256:" + letter * 64, "sha": letter * 40} for letter in ("a", "b", "c")
+    ]
+    ops.write_state(tmp_path, {"releases": releases[:2], "blocked": []})
+    calls = []
+    monkeypatch.setattr(ops, "run", lambda *args, **kwargs: calls.append(args) or "")
+    monkeypatch.setattr(ops, "compose", lambda *args, **kwargs: "")
+    ops.deploy(tmp_path, releases[2])
+    removals = [call for call in calls if call[:3] == ("docker", "image", "rm")]
+    assert removals == [("docker", "image", "rm", releases[0]["image"])]
+    assert not any("prune" in call or "--force" in call for call in calls)

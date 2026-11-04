@@ -119,16 +119,16 @@ def deploy(root: Path, release: dict, rollback: bool = False) -> None:
     for index, entry in enumerate(reversed(history["releases"][-2:])):
         name = ("current", "previous")[index]
         run("docker", "image", "tag", entry["image"], f"srtube-retain:{name}")
-    run(
-        "docker",
-        "image",
-        "prune",
-        "--force",
-        "--filter",
-        "until=168h",
-        "--filter",
-        f"label=org.opencontainers.image.source=https://github.com/{REPOSITORY}",
-    )
+    retained = {entry["image"] for entry in history["releases"][-2:]}
+    obsolete = {entry["image"] for entry in history["releases"]} - retained
+    for image in sorted(obsolete):
+        if not DIGEST.fullmatch(image):
+            continue
+        try:
+            # Exact old SRTube digests only; never prune unrelated applications or force removal.
+            run("docker", "image", "rm", image)
+        except RuntimeError:
+            pass  # Already absent or still in use. Cleanup must not fail a healthy release.
 
 
 def candidate() -> dict | None:
