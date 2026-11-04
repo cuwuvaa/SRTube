@@ -135,3 +135,32 @@ def test_deploy_rejects_mutable_or_foreign_images(tmp_path):
     for image in ["ubuntu:latest", ops.IMAGE + ":main", "ghcr.io/attacker/repo@sha256:" + "a" * 64]:
         with pytest.raises(ValueError):
             ops.deploy(tmp_path, {"image": image, "sha": "a" * 40})
+
+
+def test_manual_rollback_keeps_current_state_and_blocks_reinstall(tmp_path, monkeypatch):
+    ops = load_ops()
+    old = {"image": ops.IMAGE + "@sha256:" + "a" * 64, "sha": "a" * 40}
+    current = {"image": ops.IMAGE + "@sha256:" + "b" * 64, "sha": "b" * 40}
+    ops.write_state(tmp_path, {"releases": [old, current], "blocked": []})
+    database = tmp_path / "srtube.sqlite3"
+    database.write_bytes(b"current access revocations must survive rollback")
+    monkeypatch.setattr(ops, "run", lambda *args, **kwargs: "")
+    monkeypatch.setattr(ops, "compose", lambda *args, **kwargs: "")
+    ops.deploy(tmp_path, old, rollback=True)
+    assert ops.state(tmp_path)["releases"][-1]["image"] == old["image"]
+    assert ops.state(tmp_path)["blocked"] == [current["sha"]]
+    assert database.read_bytes() == b"current access revocations must survive rollback"
+
+
+def test_first_failed_release_is_blocked(tmp_path, monkeypatch):
+    ops = load_ops()
+    release = {"image": ops.IMAGE + "@sha256:" + "a" * 64, "sha": "a" * 40}
+    monkeypatch.setattr(ops, "run", lambda *args, **kwargs: "")
+
+    def unhealthy(*args, **kwargs):
+        raise RuntimeError("unhealthy")
+
+    monkeypatch.setattr(ops, "compose", unhealthy)
+    with pytest.raises(RuntimeError, match="health checks"):
+        ops.deploy(tmp_path, release)
+    assert ops.state(tmp_path) == {"releases": [], "blocked": [release["sha"]]}

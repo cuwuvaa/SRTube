@@ -101,12 +101,12 @@ def deploy(root: Path, release: dict, rollback: bool = False) -> None:
         # Give polling time to refresh its heartbeat after initial startup.
         compose(root, "exec", "-T", "bot", "python", "-m", "srtube", "--healthcheck")
     except Exception:
+        history["blocked"] = list(dict.fromkeys([*history["blocked"], release["sha"]]))[-20:]
+        write_state(root, history)
         if previous:
             compose(root, "stop", "bot")
             set_image(root, previous["image"])
             compose(root, "up", "-d", "--wait", "--wait-timeout", "150", timeout=210)
-            history["blocked"] = list(dict.fromkeys([*history["blocked"], release["sha"]]))[-20:]
-            write_state(root, history)
         raise RuntimeError(
             "Release failed health checks; previous image was restored when available"
         ) from None
