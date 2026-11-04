@@ -31,20 +31,53 @@ FORBIDDEN = {
 }
 
 
+def forbidden(relative: Path, symlink: bool = False) -> bool:
+    return (
+        symlink
+        or relative.suffix in FORBIDDEN
+        or any(
+            part in {"data", "data-dev", "data-prod", "secrets", "runtime", ".ssh", "backups"}
+            for part in relative.parts
+        )
+        or (relative.name.startswith(".env") and relative.name not in EXAMPLES)
+        or ("cookies" in relative.name.lower() and relative.suffix in {".txt", ".json"})
+    )
+
+
+def credential(raw: bytes) -> bool:
+    return bool(TOKEN.search(raw) or PRIVATE.search(raw) or b"# Netscape HTTP Cookie File" in raw[:128])
+
+
+def git(*args: str) -> bytes:
+    argv = [shutil.which("git") or "/usr/bin/git", *args]
+    result = subprocess.run(argv, cwd=ROOT, capture_output=True, check=True)  # nosec B603
+    return result.stdout
+
+
+def check_index() -> list[str]:
+    failures = []
+    for entry in git("ls-files", "--stage", "-z").split(b"\0"):
+        if not entry:
+            continue
+        metadata, name = entry.split(b"\t", 1)
+        mode, oid, stage = metadata.decode("ascii").split()
+        relative = Path(name.decode())
+        if stage != "0" or forbidden(relative, mode == "120000") or mode == "160000":
+            failures.append(f"Forbidden staged path: {relative}")
+            continue
+        if int(git("cat-file", "-s", oid)) > 2_000_000:
+            failures.append(f"Staged file exceeds the source size limit: {relative}")
+            continue
+        if credential(git("cat-file", "blob", oid)):
+            failures.append(f"Credential pattern found in staged file: {relative}")
+    return failures
+
+
 def check(paths: list[Path]) -> list[str]:
     failures = []
     for path in paths:
         relative = path.relative_to(ROOT)
-        if (
-            path.is_symlink()
-            or path.suffix in FORBIDDEN
-            or any(
-                part in {"data", "data-dev", "data-prod", "secrets", "runtime", ".ssh", "backups"}
-                for part in relative.parts
-            )
-            or (path.name.startswith(".env") and path.name not in EXAMPLES)
-            or ("cookies" in path.name.lower() and path.suffix in {".txt", ".json"})
-        ):
+        if forbidden(relative, path.is_symlink()):
             failures.append(f"Forbidden tracked path: {relative}")
             continue
         if not path.is_file():
@@ -53,23 +86,14 @@ def check(paths: list[Path]) -> list[str]:
             failures.append(f"Tracked file exceeds the source size limit: {relative}")
             continue
         raw = path.read_bytes()
-        if TOKEN.search(raw) or PRIVATE.search(raw) or raw.startswith(b"# Netscape HTTP Cookie File\n"):
+        if credential(raw):
             failures.append(f"Credential pattern found: {relative}")
     return failures
 
 
 def main() -> None:
-    argv = [
-        shutil.which("git") or "/usr/bin/git",
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ]
-    result = subprocess.run(argv, cwd=ROOT, capture_output=True, check=True)  # nosec B603
-    files = result.stdout.split(b"\0")
-    failures = check([ROOT / path.decode() for path in files if path])
+    files = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
+    failures = check_index() + check([ROOT / path.decode() for path in files if path])
     if failures:
         print("\n".join(failures))
         raise SystemExit(1)

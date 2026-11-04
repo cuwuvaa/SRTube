@@ -179,3 +179,18 @@ def test_release_cleanup_only_removes_obsolete_srtube_digest(tmp_path, monkeypat
     removals = [call for call in calls if call[:3] == ("docker", "image", "rm")]
     assert removals == [("docker", "image", "rm", releases[0]["image"])]
     assert not any("prune" in call or "--force" in call for call in calls)
+
+
+def test_secret_guard_checks_staged_blob_even_after_worktree_is_clean(tmp_path, monkeypatch):
+    path = Path(__file__).resolve().parents[1] / "scripts/check_secrets.py"
+    spec = importlib.util.spec_from_file_location("secret_guard", path)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    monkeypatch.setattr(guard, "ROOT", tmp_path)
+    guard.git("init", "--quiet")
+    candidate = tmp_path / "settings.txt"
+    candidate.write_text("123456789:" + "x" * 35)
+    guard.git("add", "settings.txt")
+    candidate.write_text("safe working tree")
+    assert guard.check([candidate]) == []
+    assert guard.check_index() == ["Credential pattern found in staged file: settings.txt"]
