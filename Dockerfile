@@ -36,7 +36,7 @@ ENV SRTUBE_REVISION=$REVISION
 LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
 WORKDIR /app
-RUN apk upgrade --no-cache && apk add --no-cache python-3.12 nodejs-24 lame opus ca-certificates \
+RUN apk upgrade --no-cache && apk add --no-cache python-3.12 nodejs-24 lame-libs opus ca-certificates \
     && addgroup -g 10001 srtube && adduser -D -u 10001 -G srtube srtube
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=audio /opt/audio/bin/ffmpeg /opt/audio/bin/ffprobe /usr/local/bin/
