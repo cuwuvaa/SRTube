@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
 FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS audio
 WORKDIR /build
-RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gnupg xz lame-dev opus-dev
+RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gpg gpg-agent xz lame-dev opus-dev
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
 RUN curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
     && curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
