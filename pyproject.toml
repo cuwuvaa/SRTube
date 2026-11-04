@@ -1,0 +1,43 @@
+[project]
+name = "srtube"
+version = "0.2.0"
+description = "YouTube to tagged MP3 and adjustable slowed + reverb in Telegram"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.31,<4",
+    "bgutil-ytdlp-pot-provider>=2.0.2,<3",
+    "mutagen>=1.47,<2",
+    "pillow>=13,<14",
+    "pydantic-settings>=2.7,<3",
+    "yt-dlp[default]>=2026.10.14",
+]
+
+[project.scripts]
+srtube = "srtube.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.8,<2",
+    "pip-audit>=2.9,<3",
+    "pytest>=8,<10",
+    "pytest-asyncio>=1,<2",
+    "pyyaml>=6,<7",
+    "ruff>=0.14,<1",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

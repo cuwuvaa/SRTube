@@ -1,0 +1,78 @@
+name: srtube-production
+
+x-runtime: &runtime
+  image: ${SRTUBE_IMAGE:?Set immutable image digest in release.env}
+  restart: unless-stopped
+  init: true
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 96
+  ulimits:
+    core:
+      soft: 0
+      hard: 0
+  mem_limit: 512m
+  memswap_limit: 512m
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: 5m
+      max-file: "2"
+
+services:
+  bot:
+    <<: *runtime
+    cpus: "0.25"
+    env_file: ${SRTUBE_PROD_ENV:-.env.prod}
+    environment:
+      ENVIRONMENT: production
+      DATA_DIR: /app/state
+      TRACKS_DIR: /app/tracks
+      BOT_TOKEN_FILE: /app/state/auth/bot.token
+      RENDERER_SOCKET: /run/srtube/renderer.sock
+      MAX_WORKERS: "1"
+      MAX_QUEUE: "3"
+      MAX_CACHE_BYTES: "1000000000"
+      FFMPEG_THREADS: "1"
+    volumes:
+      - state:/app/state
+      - tracks:/app/tracks
+      - renderer_socket:/run/srtube
+    depends_on:
+      renderer:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -m, srtube.healthcheck, bot]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  renderer:
+    <<: *runtime
+    cpus: "0.55"
+    network_mode: none
+    command: [python, -m, srtube.renderer]
+    environment:
+      TRACKS_DIR: /app/tracks
+      RENDERER_SOCKET_PATH: /run/srtube/renderer.sock
+      FFMPEG_THREADS: "1"
+    volumes:
+      - tracks:/app/tracks
+      - renderer_socket:/run/srtube
+    healthcheck:
+      test: [CMD, python, -m, srtube.healthcheck, renderer]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  state:
+  tracks:
+  renderer_socket:

@@ -1,0 +1,55 @@
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS javascript
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
+FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337 AS audio
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config nasm curl gnupg xz-utils ca-certificates libmp3lame-dev libopus-dev
+# Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
+RUN curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+    && curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
+    && curl -fsSLo release-key.asc https://ffmpeg.org/ffmpeg-devel.asc \
+    && echo '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  ffmpeg-9.0.2.tar.xz' | sha256sum -c - \
+    && mkdir -m 700 keyring \
+    && gpg --batch --homedir /build/keyring --import release-key.asc \
+    && test "$(gpg --batch --homedir /build/keyring --with-colons --list-keys | awk -F: '$1=="fpr" {print $10; exit}')" = FCF986EA15E6E293A5644F10B4322F04D67658D8 \
+    && gpg --batch --homedir /build/keyring --verify ffmpeg-9.0.2.tar.xz.asc ffmpeg-9.0.2.tar.xz \
+    && tar -xf ffmpeg-9.0.2.tar.xz --strip-components=1
+RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
+      --disable-debug --disable-doc --disable-network --disable-ffplay --disable-avdevice \
+      --disable-swscale --disable-gpl --disable-nonfree --enable-pic \
+      --enable-ffmpeg --enable-ffprobe --enable-avcodec --enable-avformat --enable-avfilter --enable-swresample \
+      --enable-libmp3lame --enable-libopus --enable-protocol=file,pipe \
+      --enable-demuxer=matroska,mov,ogg,mp3,aac,wav,flac \
+      --enable-parser=aac,mpegaudio,opus,vorbis,flac \
+      --enable-decoder=aac,aac_fixed,mp3,mp3float,opus,vorbis,flac,pcm_s16le,pcm_s16be,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le \
+      --enable-encoder=libmp3lame,libopus,pcm_s16le --enable-muxer=mp3,ogg,wav \
+      --enable-filter=abuffer,abuffersink,aformat,aresample,asetrate,asplit,apad,afir,volume,amix,anull,alimiter,atrim,asetpts,afade \
+      --extra-cflags='-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2' \
+      --extra-ldflags='-Wl,-z,relro,-z,now -Wl,-z,noexecstack' \
+    && make -j2 && make install \
+    && mkdir -p /opt/audio/licenses && cp COPYING.LGPLv2.1 /opt/audio/licenses/
+FROM python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+ARG REVISION=local
+ENV SRTUBE_REVISION=$REVISION
+LABEL org.opencontainers.image.revision=$REVISION
+LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libmp3lame0 libopus0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 srtube
+COPY --from=uv /uv /usr/local/bin/uv
+COPY --from=javascript /usr/local/bin/node /usr/local/bin/node
+COPY --from=audio /opt/audio/bin/ffmpeg /opt/audio/bin/ffprobe /usr/local/bin/
+COPY --from=audio /opt/audio/licenses /usr/local/share/licenses/ffmpeg
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable \
+    && rm -rf /root/.cache \
+    && mkdir -p /app/data /app/state /app/tracks /run/srtube \
+    && chown srtube:srtube /app/data /app/state /app/tracks /run/srtube \
+    && chmod 700 /app/data /app/state /app/tracks /run/srtube
+USER srtube
+ENV PATH="/app/.venv/bin:$PATH" DATA_DIR=/app/data
+CMD ["python", "-m", "srtube"]

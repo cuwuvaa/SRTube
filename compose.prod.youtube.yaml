@@ -1,0 +1,31 @@
+services:
+  bot:
+    environment:
+      YOUTUBE_POT_PROVIDER_URL: http://pot-provider:4416
+      YOUTUBE_PLAYER_CLIENTS: mweb,tv,web_safari
+    depends_on:
+      pot-provider:
+        condition: service_healthy
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2@sha256:d7d34108b76e52c7d3b575fe9e797e4bf41c1b2a08f80c5292eff6f851ce847
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: "0.10"
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 48
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4416/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
