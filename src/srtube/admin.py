@@ -59,9 +59,14 @@ def youtube_text(settings: Settings, storage: Storage) -> str:
         age = max(0, int((time.time() - last["at"]) / 60))
         issue = ISSUES.get(last["code"], ISSUES["unknown"])
         text += f"\nПоследний отказ ({age} мин. назад):\n{escape(issue)}\n"
+    command = (
+        "docker compose exec -T bot python -m srtube --import-cookies - &lt; cookies.txt"
+        if settings.environment == "production"
+        else "uv run srtube --env-file .env.dev --import-cookies /путь/cookies.txt"
+    )
     text += (
-        "\nДля подключения аккаунта импортируй cookies.txt на машине с ботом:\n"
-        "<code>uv run srtube --import-cookies /путь/cookies.txt</code>\n\n"
+        "\nИмпортируй сессию в нужное окружение по инструкции docs/youtube-session.md:\n"
+        f"<code>{command}</code>\n\n"
         "Cookies читаются заново при каждой загрузке; после импорта перезапуск не нужен. "
         "Наличие файла не гарантирует, что YouTube принимает сессию. Проверка ниже проверяет получение аудиоформата."
     )

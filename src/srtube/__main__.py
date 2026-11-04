@@ -115,7 +115,10 @@ async def serve(
 def main() -> None:
     parser = argparse.ArgumentParser(description="SRTube Telegram bot")
     parser.add_argument(
-        "--env-file", type=Path, default=Path(".env"), help="Отдельный файл окружения, например .env.dev"
+        "--env-file",
+        type=Path,
+        default=Path(".env.dev") if Path(".env.dev").is_file() else Path(".env"),
+        help="Отдельный файл окружения; на рабочей машине по умолчанию .env.dev",
     )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
