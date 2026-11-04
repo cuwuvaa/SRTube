@@ -18,8 +18,14 @@ FORBIDDEN = {
     ".sqlite",
     ".db",
     ".mp3",
+    ".m4a",
+    ".mp4",
+    ".aac",
+    ".flac",
     ".webm",
     ".wav",
+    ".ogg",
+    ".opus",
     ".log",
     ".pid",
 }
@@ -37,10 +43,14 @@ def check(paths: list[Path]) -> list[str]:
                 for part in relative.parts
             )
             or (path.name.startswith(".env") and path.name not in EXAMPLES)
+            or ("cookies" in path.name.lower() and path.suffix in {".txt", ".json"})
         ):
             failures.append(f"Forbidden tracked path: {relative}")
             continue
         if not path.is_file():
+            continue
+        if path.stat().st_size > 2_000_000:
+            failures.append(f"Tracked file exceeds the source size limit: {relative}")
             continue
         raw = path.read_bytes()
         if TOKEN.search(raw) or PRIVATE.search(raw) or raw.startswith(b"# Netscape HTTP Cookie File\n"):

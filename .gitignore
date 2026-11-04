@@ -8,6 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+.venv*/
+venv/
+.tox/
+.nox/
+.mypy_cache/
+.hypothesis/
+.cache/
 
 # Local secrets and downloaded media
 .env
@@ -22,8 +29,8 @@ runtime/
 state/
 backups/
 artifacts/
-cookies*.txt
-*.cookies.txt
+*cookies*.txt
+*cookies*.json
 secrets/
 .pytest_cache/
 .ruff_cache/
@@ -47,12 +54,20 @@ id_rsa*
 id_ed25519*
 *.mp3
 *.m4a
+*.mp4
+*.aac
+*.flac
 *.webm
 *.wav
 *.ogg
 *.opus
 *.jpg
+*.jpeg
 *.png
 *.tar
 *.tar.gz
+*.tar.xz
+*.tar.zst
+*.7z
+*.rar
 *.zip
