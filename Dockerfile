@@ -36,6 +36,7 @@ LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
 WORKDIR /app
 RUN apk upgrade --no-cache && apk add --no-cache nodejs lame-libs opus ca-certificates \
+    && apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/main 'sqlite-libs=3.54.1-r0' \
     && addgroup -g 10001 srtube && adduser -D -u 10001 -G srtube srtube
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=audio /opt/audio/bin/ffmpeg /opt/audio/bin/ffprobe /usr/local/bin/
