@@ -14,6 +14,10 @@ runs:
     - name: Verify production boundaries
       shell: bash
       run: python3 scripts/container_smoke.py --image srtube:ci
+    - name: Verify musl runtime and supported Python
+      shell: bash
+      run: |
+        docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 128m srtube:ci python -c 'import pathlib, sys; assert sys.version_info[:2] == (3, 12); packages = pathlib.Path("/lib/apk/db/installed").read_text(); assert "\nP:glibc" not in packages, "glibc must not return to the musl runtime"; assert list(pathlib.Path("/lib").glob("ld-musl-*.so.1")), "musl loader is missing"'
     - name: Verify the scoped SQLite CLI finding is not applicable
       shell: bash
       run: |

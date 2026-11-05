@@ -1,8 +1,7 @@
 FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
-FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61 AS audio
+FROM python:3.12-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS audio
 WORKDIR /build
-RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gpg gpg-agent xz lame-dev opus-dev
-RUN apk add --no-cache gnutar
+RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gnupg xz tar lame-dev opus-dev
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
 RUN curl --retry 2 --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
     && curl -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
@@ -28,7 +27,7 @@ RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
       --extra-ldflags='-Wl,-z,relro,-z,now -Wl,-z,noexecstack' \
     && make -j2 && make install \
     && mkdir -p /opt/audio/licenses && cp COPYING.LGPLv2.1 /opt/audio/licenses/
-FROM cgr.dev/chainguard/wolfi-base@sha256:771146c2dfc880902a185f060c3db5571473c46b267edd98c3119c83068dfb61
+FROM python:3.12-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 ARG REVISION=local
@@ -36,14 +35,14 @@ ENV SRTUBE_REVISION=$REVISION
 LABEL org.opencontainers.image.revision=$REVISION
 LABEL org.opencontainers.image.source="https://github.com/cuwuvaa/SRTube"
 WORKDIR /app
-RUN apk upgrade --no-cache && apk add --no-cache python-3.12 nodejs-24 lame-libs opus ca-certificates \
+RUN apk upgrade --no-cache && apk add --no-cache nodejs lame-libs opus ca-certificates \
     && addgroup -g 10001 srtube && adduser -D -u 10001 -G srtube srtube
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=audio /opt/audio/bin/ffmpeg /opt/audio/bin/ffprobe /usr/local/bin/
 COPY --from=audio /opt/audio/licenses /usr/local/share/licenses/ffmpeg
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable --python /usr/bin/python3.12 --no-python-downloads \
+RUN uv sync --frozen --no-dev --no-editable --python /usr/local/bin/python3.12 --no-python-downloads \
     && rm -f /usr/local/bin/uv \
     && rm -rf /root/.cache \
     && mkdir -p /app/data /app/state /app/tracks /run/srtube \
