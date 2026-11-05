@@ -31,6 +31,7 @@ from .metadata_editor import build_metadata_router
 from .models import YOUTUBE_MESSAGE, Effects, Track, parse_effects, youtube_url
 from .security import upload_snapshot
 from .storage import Storage
+from .track_cache import TrackCache
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ async def send_track(
     async with upload_snapshot(
         storage.root, [(path, 49_000_000), (directory / "thumbnail.jpg", 200_000)]
     ) as files:
-        await message.answer_audio(
+        sent = await message.answer_audio(
             audio=FSInputFile(
                 files[0], filename=f"{track.filename}{' (' + effects.suffix + ')' if effects else ''}.mp3"
             ),
@@ -114,6 +115,8 @@ async def send_track(
             reply_markup=track_keyboard(track.id, effects),
             request_timeout=180,
         )
+        if effects is None and sent.audio:
+            storage.remember_file(track.id, track.user_id, "audio", sent.audio.file_id, sent.audio.file_size)
 
 
 def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: Jobs) -> Dispatcher:
@@ -122,12 +125,13 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
     dp.update.outer_middleware(updates)
     dp.shutdown.register(updates.shutdown)
     access = Access(settings, storage)
+    cache = TrackCache(settings, storage, media, access)
     dp.message.filter(F.chat.type == "private")
     dp.callback_query.filter(F.message.chat.type == "private")
     dp.message.outer_middleware(AccessMiddleware(access))
     dp.callback_query.outer_middleware(AccessMiddleware(access))
     dp.include_router(build_admin_router(settings, storage, media, jobs, access))
-    dp.include_router(build_metadata_router(settings, storage, media, jobs, access))
+    dp.include_router(build_metadata_router(settings, storage, media, jobs, access, cache))
     router = Router(name="srtube")
 
     @router.message(CommandStart())
@@ -160,13 +164,14 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
         await state.clear()
         if message.from_user is None:
             return
-        track = storage.latest(message.from_user.id)
+        track = storage.latest_record(message.from_user.id)
         if track is None:
             await message.answer("В кэше пока нет твоих треков. Пришли ссылку на YouTube или свой MP3.")
             return
         try:
             async with jobs.slot(message.from_user.id, track.id):
                 access.require(message.from_user.id)
+                track = await cache.ensure(track.id, message.from_user.id, message)
                 async with ChatActionSender.upload_voice(bot=message.bot, chat_id=message.chat.id):
                     await send_track(message, track, storage)
         except UserError as exc:
@@ -217,7 +222,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
         if not isinstance(message, Message):
             await query.answer("Открой диалог с ботом.", show_alert=True)
             return
-        track = storage.get(callback_data.track, query.from_user.id)
+        track = storage.record(callback_data.track, query.from_user.id)
         if track is None:
             await query.answer("Трек больше не в кэше. Пришли ссылку или MP3 заново.", show_alert=True)
             return
@@ -231,6 +236,12 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
             await query.answer("Используй ±5% или «Ввести точные проценты».")
             return
         await query.answer()
+        try:
+            async with jobs.slot(query.from_user.id, track.id):
+                track = await cache.ensure(track.id, query.from_user.id, message)
+        except UserError as exc:
+            await message.answer(str(exc))
+            return
         if action in {"open", "set"}:
             await state.clear()
             kwargs = {"reply_markup": effects_keyboard(track.id, effects)}
@@ -343,4 +354,4 @@ async def cleanup_loop(settings: Settings, storage: Storage, jobs: Jobs) -> None
             storage.cleanup(settings.cache_hours, settings.max_cache_bytes, jobs.protected)
         except OSError as exc:
             logger.warning("Cache cleanup failed: %s", type(exc).__name__)
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)

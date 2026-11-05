@@ -1,5 +1,6 @@
 import asyncio
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 
@@ -40,6 +41,7 @@ class RecordingSession(BaseSession):
         self.requests = []
         self.uploads = []
         self.download = b""
+        self.downloads = {}
 
     async def close(self):
         pass
@@ -49,22 +51,47 @@ class RecordingSession(BaseSession):
         if isinstance(method, (AnswerCallbackQuery, SendChatAction)):
             return True
         if isinstance(method, GetFile):
-            return File(file_id=method.file_id, file_unique_id="cover", file_path="photos/cover")
+            return File(
+                file_id=method.file_id, file_unique_id=method.file_id, file_path=f"files/{method.file_id}"
+            )
+        audio = None
+        photo = None
         if isinstance(method, (SendAudio, SendVoice)):
             file = method.audio if isinstance(method, SendAudio) else method.voice
-            self.uploads.append((type(method), b"".join([chunk async for chunk in file.read(bot)])))
+            raw = b"".join([chunk async for chunk in file.read(bot)])
+            self.uploads.append((type(method), raw))
+            if isinstance(method, SendAudio):
+                file_id = f"audio-{len(self.requests)}"
+                self.downloads[file_id] = raw
+                audio = Audio(
+                    file_id=file_id,
+                    file_unique_id=file_id,
+                    duration=60,
+                    title=method.title,
+                    performer=method.performer,
+                    file_size=len(raw),
+                )
         if isinstance(method, (SendPhoto, EditMessageMedia)):
             file = method.photo if isinstance(method, SendPhoto) else method.media.media
-            self.uploads.append((type(method), b"".join([chunk async for chunk in file.read(bot)])))
+            raw = b"".join([chunk async for chunk in file.read(bot)])
+            self.uploads.append((type(method), raw))
+            file_id = f"cover-{len(self.requests)}"
+            self.downloads[file_id] = raw
+            photo = [
+                PhotoSize(file_id=file_id, file_unique_id=file_id, width=800, height=800, file_size=len(raw))
+            ]
         return Message(
             message_id=len(self.requests) + 100,
             date=datetime.now(UTC),
             chat=Chat(id=int(method.chat_id), type="private"),
             text=method.text if isinstance(method, (SendMessage, EditMessageText)) else None,
+            audio=audio,
+            photo=photo,
         ).as_(bot)
 
     async def stream_content(self, *args, **kwargs):
-        yield self.download
+        file_id = kwargs.get("url", "").rsplit("/", 1)[-1]
+        yield self.downloads.get(file_id, self.download)
 
 
 class FakeMedia:
@@ -75,7 +102,9 @@ class FakeMedia:
         self.rendered = []
         self.edited = []
 
-    async def ingest(self, track_id, user_id, chat_id, url, progress):
+    async def ingest(
+        self, track_id, user_id, chat_id, url, progress, *, metadata_override=None, cover_raw=None
+    ):
         await progress("Готовлю MP3…")
         directory = self.storage.directory(track_id)
         directory.mkdir()
@@ -85,6 +114,8 @@ class FakeMedia:
         track = Track(
             track_id, user_id, chat_id, "Song <3", "Artist & Co", url, 60, "source.webm", time.time()
         )
+        if metadata_override:
+            track = replace(metadata_override, source_name="source.webm")
         self.storage.save(track)
         return track
 
@@ -94,7 +125,18 @@ class FakeMedia:
         path.write_bytes(b"preview" if preview else b"effects")
         return path
 
-    async def ingest_mp3(self, track_id, user_id, chat_id, filename, download, progress):
+    async def ingest_mp3(
+        self,
+        track_id,
+        user_id,
+        chat_id,
+        filename,
+        download,
+        progress,
+        *,
+        metadata_override=None,
+        cover_raw=None,
+    ):
         directory = self.storage.directory(track_id)
         directory.mkdir()
         await download(directory / "source.mp3")
@@ -112,6 +154,8 @@ class FakeMedia:
             time.time(),
             album="Uploaded album",
         )
+        if metadata_override:
+            track = replace(metadata_override, source_name="source.mp3")
         self.storage.save(track)
         return track
 
@@ -196,6 +240,66 @@ async def metadata_click(dp, bot, track, action, user_id=1, photo=False):
         data=MetadataAction(action=action, track=track.id).pack(),
     )
     await dp.feed_update(bot, Update(update_id=20, callback_query=query))
+
+
+async def test_metadata_editor_restores_expired_track_and_saved_edits_from_telegram(bot_env, monkeypatch):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    updated = replace(track, title="Сохранённое название", artist="Исполнитель", album="Альбом")
+    storage.save(updated)
+    assert storage.file(track.id, 1, "audio") is not None
+    storage.evict(track.id)
+    assert storage.record(track.id, 1) == updated
+
+    async def no_youtube(*args, **kwargs):
+        raise AssertionError("Restore must download the existing Telegram MP3")
+
+    monkeypatch.setattr(media, "ingest", no_youtube)
+    await metadata_click(dp, bot, updated, "open")
+    restored = storage.get(track.id, 1)
+    assert restored.title == updated.title and restored.album == updated.album
+    assert restored.url == updated.url and restored.source_name == "source.mp3"
+    assert "Сохранённое название" in session.requests[-1].text
+    assert (storage.directory(track.id) / "original.mp3").read_bytes() == b"original"
+
+
+async def test_uploaded_mp3_and_last_restore_after_eviction_without_changing_track_id(bot_env):
+    dp, bot, session, storage, _ = bot_env
+    session.download = b"own mp3"
+    await dp.feed_update(bot, Update(update_id=1, message=mp3_message()))
+    track = storage.latest(1)
+    storage.evict(track.id)
+    await dp.feed_update(bot, Update(update_id=2, message=user_message("/last")))
+    assert session.uploads[-1] == (SendAudio, b"own mp3")
+    assert storage.latest(1).id == track.id
+
+
+async def test_edited_cover_is_saved_as_telegram_reference_for_restore(bot_env):
+    dp, bot, _, storage, _ = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    await metadata_click(dp, bot, track, "rotate", photo=True)
+    assert storage.file(track.id, 1, "cover") is not None
+    storage.evict(track.id)
+    await metadata_click(dp, bot, track, "open")
+    assert storage.get(track.id, 1) is not None
+
+
+async def test_large_telegram_mp3_uses_youtube_fallback_preserving_metadata(bot_env):
+    dp, bot, session, storage, _ = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    updated = replace(track, title="Отредактированный трек", album="Мой альбом")
+    storage.save(updated)
+    storage.remember_file(track.id, 1, "audio", "large-audio", 30_000_000)
+    storage.evict(track.id)
+    await metadata_click(dp, bot, updated, "open")
+    assert storage.get(track.id, 1).album == updated.album
+    assert storage.get(track.id, 1).title == updated.title
+    assert not any(
+        isinstance(request, GetFile) and request.file_id == "large-audio" for request in session.requests
+    )
 
 
 async def test_album_can_be_set_and_cleared(bot_env):

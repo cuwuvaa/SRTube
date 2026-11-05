@@ -3,7 +3,6 @@ import re
 from contextlib import suppress
 from dataclasses import replace
 from html import escape
-from io import BufferedWriter, BytesIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,29 +22,13 @@ from .media import MAX_MP3_BYTES, Media
 from .models import YOUTUBE_MESSAGE, Track, editable_text
 from .security import upload_snapshot
 from .storage import Storage
+from .track_cache import TrackCache
+from .transfers import ArtworkBuffer, MP3Writer
 
 
 class MetadataInput(StatesGroup):
     text = State()
     cover = State()
-
-
-class ArtworkBuffer(BytesIO):
-    def write(self, data: bytes) -> int:
-        if self.tell() + len(data) > MAX_ARTWORK_BYTES:
-            raise UserError("Обложка должна быть не больше 10 МБ.")
-        return super().write(data)
-
-
-class MP3Writer(BufferedWriter):
-    def __init__(self, path: Path, limit: int):
-        super().__init__(path.open("xb", buffering=0))
-        self.limit = limit
-
-    def write(self, data: bytes) -> int:
-        if self.tell() + len(data) > self.limit:
-            raise UserError(f"MP3 должен быть не больше {self.limit // 1_000_000} МБ.")
-        return super().write(data)
 
 
 def is_mp3_upload(message: Message) -> bool:
@@ -82,13 +65,13 @@ def is_editor_input(message: Message) -> bool:
 
 
 def build_metadata_router(
-    settings: Settings, storage: Storage, media: Media, jobs: Jobs, access: Access
+    settings: Settings, storage: Storage, media: Media, jobs: Jobs, access: Access, cache: TrackCache
 ) -> Router:
     router = Router(name="metadata")
 
     def require_track(track_id: str, user_id: int) -> Track:
         access.require(user_id)
-        track = storage.get(track_id, user_id)
+        track = storage.record(track_id, user_id)
         if track is None:
             raise UserError("Трек больше не в кэше. Пришли ссылку или MP3 заново.")
         return track
@@ -113,17 +96,21 @@ def build_metadata_router(
             photo = FSInputFile(files[0])
             if edit and message.photo:
                 try:
-                    await message.edit_media(
+                    sent = await message.edit_media(
                         media=InputMediaPhoto(media=photo, caption=cover_text(track)),
                         reply_markup=cover_keyboard(track.id),
                     )
                 except TelegramBadRequest as exc:
                     if "message is not modified" not in exc.message.lower():
                         raise
+                    return
             else:
-                await message.answer_photo(
+                sent = await message.answer_photo(
                     photo=photo, caption=cover_text(track), reply_markup=cover_keyboard(track.id)
                 )
+            if isinstance(sent, Message) and sent.photo:
+                file = sent.photo[-1]
+                storage.remember_file(track.id, track.user_id, "cover", file.file_id, file.file_size)
 
     @router.callback_query(MetadataAction.filter())
     async def on_metadata(query: CallbackQuery, callback_data: MetadataAction, state: FSMContext) -> None:
@@ -138,6 +125,12 @@ def build_metadata_router(
             return
         action = callback_data.action
         await query.answer()
+        try:
+            async with jobs.slot(query.from_user.id, track.id):
+                track = await cache.ensure(track.id, query.from_user.id, message)
+        except UserError as exc:
+            await message.answer(str(exc))
+            return
         if action == "open":
             await state.clear()
             await message.answer(metadata_text(track), reply_markup=metadata_keyboard(track.id))
@@ -224,6 +217,7 @@ def build_metadata_router(
                     download,
                     progress,
                 )
+                storage.remember_file(track.id, message.from_user.id, "audio", file.file_id, file.file_size)
                 access.require(message.from_user.id)
                 await status.edit_text(
                     "✅ MP3 принят. Выбери, что изменить.\n\n" + metadata_text(track),
@@ -262,7 +256,7 @@ def build_metadata_router(
                 return
             track_id = data.get("track_id", "")
             async with jobs.slot(message.from_user.id, track_id):
-                track = require_track(track_id, message.from_user.id)
+                track = await cache.ensure(track_id, message.from_user.id, message)
                 raw = None
                 if file is not None:
                     with ArtworkBuffer() as buffer:
@@ -281,7 +275,7 @@ def build_metadata_router(
                         "✅ Сохранено.\n\n" + metadata_text(track), reply_markup=metadata_keyboard(track.id)
                     )
         except UserError as exc:
-            if storage.get(data.get("track_id", ""), message.from_user.id) is None:
+            if storage.record(data.get("track_id", ""), message.from_user.id) is None:
                 await state.clear()
             await message.answer(str(exc))
 

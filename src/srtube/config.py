@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     max_download_bytes: int = Field(default=200_000_000, ge=1_000_000)
     max_workers: int = Field(default=1, ge=1, le=4)
     max_queue: int = Field(default=8, ge=0, le=100)
-    cache_hours: int = Field(default=24, ge=1, le=168)
+    cache_hours: int = Field(default=2, ge=1, le=168)
     max_cache_bytes: int = Field(default=1_000_000_000, ge=100_000_000)
     preview_seconds: int = Field(default=20, ge=5, le=30)
     download_timeout_seconds: int = Field(default=300, ge=30, le=1800)
@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     youtube_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     admin_user_ids: str = ""
     allowed_user_ids: str = ""
+
+    @field_validator("cache_hours")
+    @classmethod
+    def limit_cache_age(cls, value: int) -> int:
+        # Keep older environment files valid while enforcing the new two-hour cap.
+        return min(value, 2)
 
     @field_validator("youtube_player_clients")
     @classmethod
