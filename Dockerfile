@@ -3,9 +3,9 @@ FROM python:3.12-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2e
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gnupg xz tar lame-dev opus-dev
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
-RUN curl --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
-    && curl --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
-    && curl --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLo release-key.asc https://ffmpeg.org/ffmpeg-devel.asc \
+RUN curl --http1.1 --tls-max 1.2 --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
+    && curl --http1.1 --tls-max 1.2 --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLO https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc \
+    && curl --http1.1 --tls-max 1.2 --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -fsSLo release-key.asc https://ffmpeg.org/ffmpeg-devel.asc \
     && echo '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  ffmpeg-9.0.2.tar.xz' | sha256sum -c - \
     && mkdir -m 700 keyring \
     && gpg --batch --homedir /build/keyring --import release-key.asc \
