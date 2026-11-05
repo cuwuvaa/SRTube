@@ -28,6 +28,20 @@ class Storage:
             "(user_id INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, added_at REAL NOT NULL)"
         )
         self.db.execute("CREATE TABLE IF NOT EXISTS runtime (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS cache_files (track_id TEXT PRIMARY KEY, stored_at REAL NOT NULL)"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS telegram_files "
+            "(track_id TEXT NOT NULL, kind TEXT NOT NULL, file_id TEXT NOT NULL, size INTEGER, "
+            "PRIMARY KEY(track_id, kind))"
+        )
+        if not self.get_runtime("cache_files_migrated"):
+            self.db.execute(
+                "INSERT OR IGNORE INTO cache_files SELECT id, COALESCE(json_extract(payload, '$.created_at'), 0) "
+                "FROM tracks WHERE json_valid(payload)"
+            )
+            self.db.execute("INSERT INTO runtime VALUES ('cache_files_migrated', 'true')")
         self.db.commit()
 
     def seed_access(self, user_ids: set[int]) -> None:
@@ -91,9 +105,10 @@ class Storage:
             "INSERT OR REPLACE INTO tracks VALUES (?, ?, ?, ?)",
             (track.id, track.user_id, time.time(), json.dumps(asdict(track), ensure_ascii=False)),
         )
+        self.db.execute("INSERT OR IGNORE INTO cache_files VALUES (?, ?)", (track.id, time.time()))
         self.db.commit()
 
-    def get(self, track_id: str, user_id: int) -> Track | None:
+    def record(self, track_id: str, user_id: int) -> Track | None:
         row = self.db.execute(
             "SELECT payload FROM tracks WHERE id = ? AND user_id = ?", (track_id, user_id)
         ).fetchone()
@@ -103,16 +118,50 @@ class Storage:
             track = Track(**json.loads(row[0]))
             if track.id != track_id or track.user_id != user_id:
                 return None
+            self.directory(track.id)
+        except (ValueError, TypeError, KeyError):
+            return None
+        return track
+
+    def get(self, track_id: str, user_id: int) -> Track | None:
+        track = self.record(track_id, user_id)
+        if track is None:
+            return None
+        try:
             directory = self.directory(track.id)
             source = media_file(directory, track.source_name)
             original = media_file(directory, "original.mp3")
-        except (ValueError, TypeError, KeyError):
+        except ValueError:
             return None
         if not source.is_file() or not original.is_file():
-            self.remove(track.id)
+            self.evict(track.id)
             return None
         self.touch(track.id)
         return track
+
+    def latest_record(self, user_id: int) -> Track | None:
+        rows = self.db.execute(
+            "SELECT id FROM tracks WHERE user_id = ? ORDER BY accessed DESC", (user_id,)
+        ).fetchall()
+        return next((track for row in rows if (track := self.record(row[0], user_id))), None)
+
+    def remember_file(self, track_id: str, user_id: int, kind: str, file_id: str, size: int | None) -> None:
+        if kind not in {"audio", "cover"} or not file_id or len(file_id) > 1024:
+            raise ValueError("Invalid Telegram file reference")
+        if self.record(track_id, user_id) is None:
+            raise ValueError("Unknown track owner")
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO telegram_files VALUES (?, ?, ?, ?)", (track_id, kind, file_id, size)
+            )
+
+    def file(self, track_id: str, user_id: int, kind: str) -> tuple[str, int | None] | None:
+        row = self.db.execute(
+            "SELECT file_id, size FROM telegram_files JOIN tracks ON tracks.id = telegram_files.track_id "
+            "WHERE track_id = ? AND user_id = ? AND kind = ?",
+            (track_id, user_id, kind),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
 
     def latest(self, user_id: int) -> Track | None:
         rows = self.db.execute(
@@ -138,13 +187,25 @@ class Storage:
         self.db.commit()
 
     def remove(self, track_id: str) -> None:
-        shutil.rmtree(self.directory(track_id), ignore_errors=True)
+        self.evict(track_id)
+        self.db.execute("DELETE FROM telegram_files WHERE track_id = ?", (track_id,))
         self.db.execute("DELETE FROM tracks WHERE id = ?", (track_id,))
         self.db.commit()
 
+    def evict(self, track_id: str) -> None:
+        """Remove heavy files while retaining owner, metadata and Telegram references."""
+        try:
+            shutil.rmtree(self.directory(track_id))
+        except FileNotFoundError:
+            pass
+        self.db.execute("DELETE FROM cache_files WHERE track_id = ?", (track_id,))
+        self.db.commit()
+
     def cleanup(self, hours: int, max_bytes: int, protected: set[str]) -> None:
-        cutoff = time.time() - hours * 3600
-        rows = self.db.execute("SELECT id, accessed FROM tracks ORDER BY accessed").fetchall()
+        cutoff = time.time() - min(hours, 2) * 3600
+        rows = self.db.execute(
+            "SELECT id, stored_at FROM tracks JOIN cache_files ON id = track_id ORDER BY accessed"
+        ).fetchall()
         known = {row[0] for row in rows}
         sizes = {
             directory.name: sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
@@ -152,16 +213,16 @@ class Storage:
             if directory.is_dir() and not directory.is_symlink()
         }
         total = sum(sizes.values())
-        for track_id, accessed in rows:
-            if track_id not in protected and (accessed < cutoff or total > max_bytes):
-                self.remove(track_id)
+        for track_id, stored_at in rows:
+            if track_id not in protected and (stored_at <= cutoff or total > max_bytes):
+                self.evict(track_id)
                 total -= sizes.get(track_id, 0)
         # Recover directories left behind by an interrupted download or process crash.
         for directory in self.tracks_dir.iterdir():
             if directory.is_symlink():
                 continue
             if directory.is_dir() and directory.name not in known | protected:
-                if directory.stat().st_mtime < time.time() - 3600:
+                if directory.stat().st_mtime <= cutoff:
                     shutil.rmtree(directory, ignore_errors=True)
 
     def close(self) -> None:

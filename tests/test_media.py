@@ -180,6 +180,28 @@ async def test_imported_mp3_preserves_audio_quality_other_tags_and_original_embe
     assert progress_messages
     await media.edit_metadata(updated, cover_action="rotate")
     assert ID3(path).getall("APIC")[0].data == (directory / "cover.jpg").read_bytes()
+    saved_cover = (directory / "cover.jpg").read_bytes()
+    storage.save(updated)
+    storage.evict(track.id)
+    restored = await media.ingest_mp3(
+        track.id,
+        track.user_id,
+        track.chat_id,
+        "incoming.mp3",
+        download,
+        progress,
+        metadata_override=updated,
+        cover_raw=saved_cover,
+    )
+    restored_tags = ID3(storage.directory(restored.id) / "original.mp3")
+    assert (
+        restored.id == updated.id
+        and restored.album == updated.album
+        and restored.created_at == updated.created_at
+    )
+    assert restored_tags["TIT2"].text == [updated.title] and restored_tags["TALB"].text == [updated.album]
+    assert (storage.directory(restored.id) / "original.mp3").read_bytes()[restored_tags.size :] == frames
+    assert restored_tags.getall("APIC")[0].data == (storage.directory(restored.id) / "cover.jpg").read_bytes()
 
 
 async def test_uploaded_mp3_without_id3_uses_filename_and_can_receive_tags(audio, tmp_path):

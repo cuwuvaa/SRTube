@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 
 import pytest
 
+from srtube.config import Settings
 from srtube.errors import UserError
 from srtube.jobs import Jobs
 from srtube.models import Track
@@ -62,6 +63,38 @@ def test_cleanup_protects_active_track_and_prunes_expired(tmp_path):
     assert storage.get(track.id, 1) is None
     assert not storage.directory(track.id).exists()
     storage.close()
+
+
+def test_two_hour_expiry_is_not_extended_by_reads_and_keeps_telegram_metadata(tmp_path):
+    storage = Storage(tmp_path)
+    track = seed(storage)
+    storage.remember_file(track.id, 1, "audio", "telegram-audio", 100)
+    storage.db.execute("UPDATE cache_files SET stored_at = ?", (time.time() - 7201,))
+    storage.db.commit()
+    assert storage.get(track.id, 1) == track
+    storage.cleanup(24, 1_000_000, {track.id})
+    assert storage.directory(track.id).exists()
+    storage.cleanup(24, 1_000_000, set())
+    assert not storage.directory(track.id).exists()
+    assert storage.get(track.id, 1) is None
+    assert storage.record(track.id, 1) == track
+    assert storage.file(track.id, 1, "audio") == ("telegram-audio", 100)
+    assert storage.file(track.id, 2, "audio") is None
+    assert storage.record(track.id, 2) is None
+    assert storage.latest_record(1) == track
+    storage.close()
+    reopened = Storage(tmp_path)
+    try:
+        assert reopened.record(track.id, 1) == track
+        assert reopened.file(track.id, 1, "audio") == ("telegram-audio", 100)
+    finally:
+        reopened.close()
+
+
+def test_legacy_cache_settings_are_capped_at_two_hours():
+    assert Settings(_env_file=None).cache_hours == 2
+    assert Settings(_env_file=None, cache_hours=24).cache_hours == 2
+    assert Settings(_env_file=None, cache_hours=1).cache_hours == 1
 
 
 def test_allowlist_persists_and_env_seed_does_not_restore_revoked_users(tmp_path):

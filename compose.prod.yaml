@@ -38,6 +38,7 @@ services:
       MAX_WORKERS: "1"
       MAX_QUEUE: "3"
       MAX_CACHE_BYTES: "1000000000"
+      CACHE_HOURS: "2"
       FFMPEG_THREADS: "1"
     volumes:
       - state:/app/state

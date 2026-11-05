@@ -6,7 +6,7 @@ from PIL import Image
 
 from srtube.artwork import CoverSettings, compose_artwork, make_artwork, open_artwork, prepare_artwork_edit
 from srtube.errors import UserError
-from srtube.metadata_editor import ArtworkBuffer
+from srtube.transfers import ArtworkBuffer
 
 
 def image_bytes(image, format="PNG"):
@@ -103,7 +103,7 @@ def test_reject_unsupported_invalid_oversized_images_and_bounded_download(monkey
     monkeypatch.setattr("srtube.artwork.MAX_ARTWORK_BYTES", 10)
     with pytest.raises(UserError, match="10 МБ"):
         open_artwork(b"a" * 11)
-    monkeypatch.setattr("srtube.metadata_editor.MAX_ARTWORK_BYTES", 10)
+    monkeypatch.setattr("srtube.transfers.MAX_ARTWORK_BYTES", 10)
     with ArtworkBuffer() as buffer:
         buffer.write(b"a" * 10)
         with pytest.raises(UserError, match="10 МБ"):

@@ -11,7 +11,7 @@ import time
 import wave
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from mutagen import MutagenError
@@ -318,6 +318,9 @@ class Media:
         filename: str,
         download: Callable[[Path], Awaitable[None]],
         progress: Progress,
+        *,
+        metadata_override: Track | None = None,
+        cover_raw: bytes | None = None,
     ) -> Track:
         directory = self.storage.directory(track_id)
         limit = min(MAX_MP3_BYTES, self.settings.max_download_bytes, self.settings.max_upload_bytes)
@@ -332,6 +335,9 @@ class Media:
             async def finish() -> Track:
                 nonlocal complete
                 track = await self.import_mp3(track_id, user_id, chat_id, filename)
+                if metadata_override is not None:
+                    track = replace(metadata_override, source_name="source.mp3", duration=track.duration)
+                    await self.edit_metadata(track, raw=cover_raw)
                 self.storage.save(track)
                 complete = True
                 return track
@@ -586,6 +592,9 @@ class Media:
         chat_id: int,
         url: str,
         progress: Progress,
+        *,
+        metadata_override: Track | None = None,
+        cover_raw: bytes | None = None,
     ) -> Track:
         directory = self.storage.directory(track_id)
         disk_space(self.settings.data_dir, self.settings.min_free_bytes + self.settings.max_download_bytes)
@@ -612,9 +621,13 @@ class Media:
                 time.time(),
                 album=clean_text(info.get("album")),
             )
+            if metadata_override is not None:
+                track = replace(metadata_override, source_name=source.name, duration=duration)
             await progress("Готовлю MP3 320 кбит/с, метаданные и обложку…")
             await download_artwork(info["id"], directory, self.settings.renderer_socket)
             await self.render(track)
+            if cover_raw is not None:
+                await self.edit_metadata(track, raw=cover_raw)
             self.storage.save(track)
             complete = True
             return track
