@@ -1,5 +1,7 @@
 import asyncio
+import json
 import time
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -30,6 +32,23 @@ def test_persistence_and_owner_isolation(tmp_path):
     assert storage.get(track.id, 1) == track
     assert storage.latest(1) == track
     storage.close()
+
+
+def test_old_cached_tracks_default_to_empty_album_and_new_album_survives_reopen(tmp_path):
+    storage = Storage(tmp_path)
+    track = seed(storage)
+    legacy = asdict(track)
+    legacy.pop("album")
+    storage.db.execute("UPDATE tracks SET payload = ? WHERE id = ?", (json.dumps(legacy), track.id))
+    storage.db.commit()
+    assert storage.get(track.id, 1).album == ""
+    storage.save(replace(track, album="Сохранённый альбом"))
+    storage.close()
+    reopened = Storage(tmp_path)
+    try:
+        assert reopened.get(track.id, 1).album == "Сохранённый альбом"
+    finally:
+        reopened.close()
 
 
 def test_cleanup_protects_active_track_and_prunes_expired(tmp_path):

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import random
 import shutil
 import struct
@@ -13,20 +14,23 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
-from mutagen.id3 import APIC, ID3, TIT2, TPE1, WOAS
+from mutagen import MutagenError
+from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, WOAS, ID3NoHeaderError
+from mutagen.mp3 import MP3
 
-from .artwork import download_artwork
+from .artwork import ARTWORK_ACTIONS, MAX_ARTWORK_BYTES, download_artwork, make_artwork, prepare_artwork_edit
 from .config import Settings
-from .errors import ProcessError, UserError
-from .models import Effects, Track, metadata
+from .errors import InvalidMP3, MP3TooLong, ProcessError, UserError
+from .models import Effects, Track, clean_text, editable_text, metadata
 from .process import run_process
 from .render_client import request
-from .security import SOURCE_NAME, disk_space, media_file
+from .security import SOURCE_NAME, copy_upload, disk_space, media_file
 from .storage import Storage
 from .youtube import classify_error, cookie_health
 
 SAMPLE_RATE = 48000
 BITRATE = 320_000
+MAX_MP3_BYTES = 20_000_000
 REVERB_TAIL = 2.4
 INPUT_FORMATS = "matroska,webm,mov,mp4,m4a,3gp,3g2,mj2,ogg,mp3,aac,wav,flac"
 Progress = Callable[[str], Awaitable[None]]
@@ -44,14 +48,112 @@ def check_size(duration: float, limit: int) -> None:
         )
 
 
-def write_tags(path: Path, track: Track, cover: Path, effects: Effects | None = None) -> None:
-    tags = ID3()
+def write_tags(
+    path: Path, track: Track, cover: Path, effects: Effects | None = None, *, replace_cover: bool = True
+) -> None:
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
     title = track.title if effects is None else f"{track.title} ({effects.suffix})"
     tags.add(TIT2(encoding=3, text=title))
     tags.add(TPE1(encoding=3, text=track.artist))
-    tags.add(WOAS(url=track.url))
-    tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover.read_bytes()))
-    tags.save(path, v2_version=3)
+    tags.delall("TALB")
+    if track.album:
+        tags.add(TALB(encoding=3, text=track.album))
+    if track.url:
+        tags.add(WOAS(url=track.url))
+    if replace_cover:
+        tags.delall("APIC")
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover.read_bytes()))
+    # Preserve ID3v2.4-only fields in an uploaded original; generated MP3s use ID3v2.3.
+    version = tags.version[1] if not track.url and effects is None and tags.version[1] in {3, 4} else 3
+    tags.save(path, v2_version=version)
+
+
+def edit_metadata_files(
+    directory: Path, track: Track, limit: int, raw: bytes | None, cover_action: str | None
+) -> None:
+    """Retag a copy, then publish the complete set without re-encoding audio."""
+    with tempfile.TemporaryDirectory(prefix="metadata-edit-", dir=directory) as temporary:
+        staged = Path(temporary)
+        cover = media_file(directory, "cover.jpg")
+        names = []
+        if raw is not None or cover_action is not None:
+            prepare_artwork_edit(directory, staged, raw, cover_action)
+            cover = staged / "cover.jpg"
+            names = [path.name for path in staged.iterdir()]
+        output = staged / "original.mp3"
+        copy_upload(media_file(directory, "original.mp3"), output, limit)
+        write_tags(output, track, cover, replace_cover=raw is not None or cover_action is not None)
+        if output.stat().st_size > limit:
+            raise UserError("MP3 с новой обложкой превышает лимит Telegram. Выбери другую обложку.")
+        names.append("original.mp3")
+        backups = staged / "backups"
+        backups.mkdir()
+        committed = []
+        try:
+            for name in names:
+                destination = media_file(directory, name)
+                if destination.exists():
+                    os.link(destination, backups / name, follow_symlinks=False)
+                os.replace(staged / name, destination)
+                committed.append(name)
+        except BaseException:
+            for name in reversed(committed):
+                backup = backups / name
+                if backup.exists():
+                    os.replace(backup, directory / name)
+                else:
+                    (directory / name).unlink(missing_ok=True)
+            raise
+
+
+def import_mp3_files(
+    directory: Path, user_id: int, chat_id: int, filename: str, duration_limit: int, byte_limit: int
+) -> Track:
+    source = media_file(directory, "source.mp3")
+    if not 0 < source.stat().st_size <= byte_limit:
+        raise UserError(f"MP3 должен быть не больше {byte_limit // 1_000_000} МБ.")
+    try:
+        audio = MP3(source)
+        duration = float(audio.info.length)
+        if not math.isfinite(duration) or duration <= 0 or audio.info.layer != 3:
+            raise InvalidMP3()
+    except (MutagenError, ValueError, OSError):
+        raise InvalidMP3() from None
+    if duration > duration_limit:
+        raise MP3TooLong(duration_limit)
+
+    def text(value: object) -> str:
+        return "".join(char for char in clean_text(value) if ord(char) >= 32 and ord(char) != 127)
+
+    def tag(name: str) -> str:
+        frame = audio.tags.get(name) if audio.tags else None
+        return text(frame.text[0]) if frame and frame.text else ""
+
+    title = tag("TIT2") or text(Path(filename.replace("\\", "/")).stem) or "Без названия"
+    track = Track(
+        directory.name,
+        user_id,
+        chat_id,
+        title,
+        tag("TPE1") or "Неизвестный исполнитель",
+        "",
+        duration,
+        "source.mp3",
+        time.time(),
+        album=tag("TALB"),
+    )
+    covers = audio.tags.getall("APIC") if audio.tags else []
+    front = next((cover for cover in covers if cover.type == 3), covers[0] if covers else None)
+    with tempfile.TemporaryDirectory(prefix="mp3-import-", dir=directory) as temporary:
+        staged = Path(temporary)
+        make_artwork(front.data if front else None, staged, ("JPEG", "PNG", "WEBP"))
+        copy_upload(source, staged / "original.mp3", byte_limit)
+        for path in staged.iterdir():
+            path.replace(media_file(directory, path.name))
+    return track
 
 
 def make_impulse(path: Path) -> None:
@@ -107,6 +209,142 @@ class Media:
         self.youtube_last_started = 0.0
         self.youtube_cooldown_until = 0.0
         self.cookie_signature: tuple[int, int] | None = None
+
+    async def edit_metadata(
+        self, track: Track, *, raw: bytes | None = None, cover_action: str | None = None
+    ) -> None:
+        if editable_text(track.title) != track.title or editable_text(track.artist) != track.artist:
+            raise ValueError("Invalid metadata")
+        if track.album and editable_text(track.album) != track.album:
+            raise ValueError("Invalid album")
+        if cover_action is not None and cover_action not in ARTWORK_ACTIONS:
+            raise ValueError("Invalid cover action")
+        if raw is not None and not 0 < len(raw) <= MAX_ARTWORK_BYTES:
+            raise UserError("Обложка должна быть не больше 10 МБ.")
+        directory = self.storage.directory(track.id)
+        disk_space(self.settings.data_dir, self.settings.min_free_bytes + self.settings.max_upload_bytes)
+        if self.settings.renderer_socket:
+            input_path = media_file(directory, "artwork.upload")
+            try:
+                if raw is not None:
+                    with input_path.open("xb") as stream:
+                        stream.write(raw)
+                result = await request(
+                    self.settings.renderer_socket,
+                    {
+                        "operation": "metadata",
+                        "track_id": track.id,
+                        "track": asdict(track),
+                        "upload": raw is not None,
+                        "cover_action": cover_action,
+                    },
+                    self.settings.render_timeout_seconds + 30,
+                )
+                if result.get("ok") is not True or not media_file(directory, "original.mp3").is_file():
+                    raise UserError("Не удалось сохранить метаданные. Попробуй ещё раз.")
+            finally:
+                input_path.unlink(missing_ok=True)
+        else:
+            # Finish filesystem publication before a cancellation releases the user's job slot.
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    edit_metadata_files, directory, track, self.settings.max_upload_bytes, raw, cover_action
+                )
+            )
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+
+    async def import_mp3(
+        self,
+        track_id: str,
+        user_id: int,
+        chat_id: int,
+        filename: str,
+        *,
+        duration_limit: int | None = None,
+        byte_limit: int | None = None,
+    ) -> Track:
+        duration_limit = self.settings.max_duration_seconds if duration_limit is None else duration_limit
+        byte_limit = (
+            min(MAX_MP3_BYTES, self.settings.max_download_bytes, self.settings.max_upload_bytes)
+            if byte_limit is None
+            else byte_limit
+        )
+        if type(duration_limit) is not int or not 10 <= duration_limit <= 7200:
+            raise ValueError("Invalid duration limit")
+        if type(byte_limit) is not int or not 0 < byte_limit <= MAX_MP3_BYTES:
+            raise ValueError("Invalid MP3 size limit")
+        if not isinstance(filename, str) or len(filename) > 1024:
+            raise ValueError("Invalid MP3 filename")
+        directory = self.storage.directory(track_id)
+        if self.settings.renderer_socket:
+            result = await request(
+                self.settings.renderer_socket,
+                {
+                    "operation": "import_mp3",
+                    "track_id": track_id,
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "filename": filename,
+                    "duration_limit": duration_limit,
+                    "byte_limit": byte_limit,
+                },
+                self.settings.render_timeout_seconds + 30,
+            )
+            track = Track(**result["track"])
+            if (
+                track.id != track_id
+                or track.user_id != user_id
+                or track.chat_id != chat_id
+                or track.source_name != "source.mp3"
+                or track.url
+                or track.duration > duration_limit
+                or not media_file(directory, "original.mp3").is_file()
+            ):
+                raise UserError("Не удалось прочитать загруженный MP3. Попробуй ещё раз.")
+            return track
+        return await asyncio.to_thread(
+            import_mp3_files, directory, user_id, chat_id, filename, duration_limit, byte_limit
+        )
+
+    async def ingest_mp3(
+        self,
+        track_id: str,
+        user_id: int,
+        chat_id: int,
+        filename: str,
+        download: Callable[[Path], Awaitable[None]],
+        progress: Progress,
+    ) -> Track:
+        directory = self.storage.directory(track_id)
+        limit = min(MAX_MP3_BYTES, self.settings.max_download_bytes, self.settings.max_upload_bytes)
+        disk_space(self.settings.data_dir, self.settings.min_free_bytes + 2 * limit)
+        directory.mkdir(mode=0o700, parents=True)
+        complete = False
+        try:
+            await progress("Скачиваю твой MP3…")
+            await download(directory / "source.mp3")
+            await progress("Читаю метаданные и обложку MP3…")
+
+            async def finish() -> Track:
+                nonlocal complete
+                track = await self.import_mp3(track_id, user_id, chat_id, filename)
+                self.storage.save(track)
+                complete = True
+                return track
+
+            task = asyncio.create_task(finish())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+        finally:
+            if not complete:
+                shutil.rmtree(directory, ignore_errors=True)
 
     async def check_tools(self) -> dict[str, str]:
         for binary in ("ffmpeg", "ffprobe"):
@@ -362,7 +600,18 @@ class Media:
                 raise UserError("Длительность скачанного аудио превышает допустимый лимит.")
             check_size(duration, self.settings.max_upload_bytes)
             title, artist = metadata(info)
-            track = Track(track_id, user_id, chat_id, title, artist, url, duration, source.name, time.time())
+            track = Track(
+                track_id,
+                user_id,
+                chat_id,
+                title,
+                artist,
+                url,
+                duration,
+                source.name,
+                time.time(),
+                album=clean_text(info.get("album")),
+            )
             await progress("Готовлю MP3 320 кбит/с, метаданные и обложку…")
             await download_artwork(info["id"], directory, self.settings.renderer_socket)
             await self.render(track)

@@ -27,7 +27,8 @@ from .errors import UserError
 from .jobs import Jobs
 from .keyboards import Action, effects_keyboard, preview_keyboard, track_keyboard
 from .media import Media
-from .models import Effects, Track, parse_effects, youtube_url
+from .metadata_editor import build_metadata_router
+from .models import YOUTUBE_MESSAGE, Effects, Track, parse_effects, youtube_url
 from .security import upload_snapshot
 from .storage import Storage
 
@@ -90,7 +91,13 @@ async def send_track(
     directory = storage.directory(track.id)
     path = directory / ("effects.mp3" if effects else "original.mp3")
     title = track.title if effects is None else f"{track.title} ({effects.suffix})"
-    caption = "🎵 MP3 · 320 кбит/с · теги и обложка"
+    caption = (
+        "🎵 MP3 · исходное качество · метаданные"
+        if not track.url and effects is None
+        else "🎵 MP3 · 320 кбит/с · теги и обложка"
+    )
+    if track.album:
+        caption += f"\n💿 {escape(track.album)}"
     if effects:
         caption += f"\n🎛 Slowed {effects.slowed}% · Reverb {effects.reverb}%"
     async with upload_snapshot(
@@ -120,6 +127,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
     dp.message.outer_middleware(AccessMiddleware(access))
     dp.callback_query.outer_middleware(AccessMiddleware(access))
     dp.include_router(build_admin_router(settings, storage, media, jobs, access))
+    dp.include_router(build_metadata_router(settings, storage, media, jobs, access))
     router = Router(name="srtube")
 
     @router.message(CommandStart())
@@ -129,10 +137,14 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
         await message.answer(
             "🎧 <b>SRTube</b>\n\n"
             "Пришли ссылку на YouTube — получишь MP3 320 кбит/с с названием, исполнителем и обложкой.\n\n"
+            "Или пришли свой <b>MP3</b> как аудио или документ — откроется редактор его метаданных.\n\n"
+            "Кнопка <b>«Редактировать метаданные»</b> меняет название, исполнителя, альбом и обложку: "
+            "загрузи свою или отредактируй существующую.\n\n"
             "Под треком нажми <b>«Сделать slowed + reverb»</b>: выбери проценты, "
             "послушай голосовое превью из середины и скачай полную версию.\n\n"
             "Slowed: 0–50% (снижает скорость и тон). Reverb: 0–100% (доля реверберации).\n"
-            f"Видео до {settings.max_duration_seconds // 60} мин.; готовый файл — до 50 МБ.\n\n"
+            f"Видео и MP3 до {settings.max_duration_seconds // 60} мин.; готовый файл — до 50 МБ.\n"
+            "Входящий MP3 — до 20 МБ.\n\n"
             "/last — последний трек\n/id — мой Telegram ID\n/cancel — отменить ввод",
         )
 
@@ -140,7 +152,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
     async def cancel(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Ввод процентов отменён. Можно использовать кнопки под треком или прислать ссылку."
+            "Ввод отменён. Можно использовать кнопки под треком или прислать ссылку либо MP3."
         )
 
     @router.message(Command("last"))
@@ -150,7 +162,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
             return
         track = storage.latest(message.from_user.id)
         if track is None:
-            await message.answer("В кэше пока нет твоих треков. Пришли ссылку на YouTube.")
+            await message.answer("В кэше пока нет твоих треков. Пришли ссылку на YouTube или свой MP3.")
             return
         try:
             async with jobs.slot(message.from_user.id, track.id):
@@ -161,7 +173,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
             await message.answer(str(exc))
 
     # URLs take precedence over a pending custom input, so a user can switch tracks immediately.
-    @router.message(F.text.regexp(r"(?i)^(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)/"))
+    @router.message(F.text.regexp(YOUTUBE_MESSAGE))
     async def receive_url(message: Message, state: FSMContext) -> None:
         if message.from_user is None:
             return
@@ -207,7 +219,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
             return
         track = storage.get(callback_data.track, query.from_user.id)
         if track is None:
-            await query.answer("Трек больше не в кэше. Пришли ссылку заново.", show_alert=True)
+            await query.answer("Трек больше не в кэше. Пришли ссылку или MP3 заново.", show_alert=True)
             return
         try:
             effects = Effects(callback_data.slowed, callback_data.reverb)
@@ -247,8 +259,9 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
             async with jobs.slot(query.from_user.id, track.id):
                 access.require(query.from_user.id)
                 # Re-check after waiting in the global queue; protected tracks cannot be pruned.
-                if storage.get(track.id, query.from_user.id) is None:
-                    raise UserError("Трек больше не в кэше. Пришли ссылку заново.")
+                track = storage.get(track.id, query.from_user.id)
+                if track is None:
+                    raise UserError("Трек больше не в кэше. Пришли ссылку или MP3 заново.")
                 await safe_edit(
                     status,
                     "⏳ Готовлю голосовое превью…" if action == "preview" else "⏳ Готовлю MP3…",
@@ -293,7 +306,7 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
         track = storage.get(data.get("track_id", ""), message.from_user.id)
         await state.clear()
         if track is None:
-            await message.answer("Трек больше не в кэше. Пришли ссылку заново.")
+            await message.answer("Трек больше не в кэше. Пришли ссылку или MP3 заново.")
             return
         await message.answer(
             panel_text(track, effects, settings.preview_seconds),
@@ -302,7 +315,9 @@ def build_dispatcher(settings: Settings, storage: Storage, media: Media, jobs: J
 
     @router.message()
     async def fallback(message: Message) -> None:
-        await message.answer("Пришли ссылку на видео YouTube. /help — как пользоваться ботом.")
+        await message.answer(
+            "Пришли ссылку на видео YouTube или MP3 как аудио или документ. /help — как пользоваться ботом."
+        )
 
     @dp.errors()
     async def on_error(event: ErrorEvent) -> bool:

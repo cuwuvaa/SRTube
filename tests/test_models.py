@@ -1,8 +1,8 @@
 import pytest
 
 from srtube.errors import UserError
-from srtube.keyboards import effects_keyboard
-from srtube.models import Effects, metadata, parse_effects, youtube_url
+from srtube.keyboards import cover_keyboard, effects_keyboard, metadata_keyboard, track_keyboard
+from srtube.models import Effects, editable_text, metadata, parse_effects, youtube_url
 
 
 @pytest.mark.parametrize(
@@ -67,3 +67,14 @@ def test_all_keyboard_payloads_fit_telegram_limit():
         for row in markup.inline_keyboard:
             for button in row:
                 assert len(button.callback_data.encode()) <= 64
+    for markup in (track_keyboard("a" * 32), metadata_keyboard("a" * 32), cover_keyboard("a" * 32)):
+        for row in markup.inline_keyboard:
+            for button in row:
+                assert len(button.callback_data.encode()) <= 64
+
+
+def test_editable_metadata_normalizes_whitespace_and_validates_length():
+    assert editable_text("  Артист \n  & трек  ") == "Артист & трек"
+    for invalid in ("", " \n ", "a" * 181, "bad\x00name", "bad\x7fname"):
+        with pytest.raises(UserError):
+            editable_text(invalid)
