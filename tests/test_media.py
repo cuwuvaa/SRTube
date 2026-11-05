@@ -11,13 +11,13 @@ from io import BytesIO
 
 import pytest
 import pytest_asyncio
-from mutagen.id3 import ID3
+from mutagen.id3 import APIC, ID3, TALB, TCOM, TDOR, TIT2, TPE1, TXXX, USLT, WOAS
 from mutagen.mp3 import MP3
 from PIL import Image
 
 from srtube.artwork import make_artwork
 from srtube.config import Settings
-from srtube.errors import UserError
+from srtube.errors import InvalidMP3, UserError
 from srtube.media import Media
 from srtube.models import Effects, Track
 from srtube.process import run_process
@@ -70,6 +70,202 @@ async def test_original_320k_and_embedded_unicode_tags_and_cover(audio):
     assert cover.mime == "image/jpeg" and cover.type == 3
     assert Image.open(BytesIO(cover.data)).size == (800, 800)
     assert (storage.directory(track.id) / "thumbnail.jpg").stat().st_size < 200000
+
+
+async def test_metadata_edit_preserves_audio_frames_and_updates_embedded_tags_and_cover(audio):
+    media, storage, track = audio
+    path = await media.render(track)
+    frames = path.read_bytes()[ID3(path).size :]
+    source = storage.directory(track.id) / track.source_name
+    source_bytes = source.read_bytes()
+    updated = replace(track, title="Новое название <3", artist="Новый & исполнитель", album="Новый альбом")
+    with BytesIO() as buffer:
+        Image.new("RGB", (640, 480), "#e03020").save(buffer, "PNG")
+        await media.edit_metadata(updated, raw=buffer.getvalue())
+    tags = ID3(path)
+    assert tags["TIT2"].text == [updated.title]
+    assert tags["TPE1"].text == [updated.artist]
+    assert tags["TALB"].text == [updated.album]
+    assert tags["WOAS"].url == track.url
+    assert tags.version == (2, 3, 0)
+    assert path.read_bytes()[tags.size :] == frames
+    assert source.read_bytes() == source_bytes
+    directory = storage.directory(track.id)
+    assert tags.getall("APIC")[0].data == (directory / "cover.jpg").read_bytes()
+    with Image.open(directory / "cover.jpg") as cover:
+        assert cover.size == (800, 800)
+        assert cover.getpixel((400, 400))[0] > 200
+    assert (directory / "thumbnail.jpg").stat().st_size < 200_000
+    rendered = await media.render(updated, Effects(20, 0))
+    assert ID3(rendered)["TPE1"].text == [updated.artist]
+    assert ID3(rendered)["TALB"].text == [updated.album]
+    assert ID3(rendered).getall("APIC")[0].data == (directory / "cover.jpg").read_bytes()
+    await media.edit_metadata(replace(updated, album=""))
+    assert "TALB" not in ID3(path)
+
+
+@pytest.mark.parametrize("tag_version", [3, 4])
+async def test_imported_mp3_preserves_audio_quality_other_tags_and_original_embedded_cover(
+    audio, tmp_path, tag_version
+):
+    media, storage, original = audio
+    incoming = tmp_path / "incoming.mp3"
+    await run_process(
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(storage.directory(original.id) / original.source_name),
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        str(incoming),
+        timeout=15,
+    )
+    with BytesIO() as buffer:
+        Image.new("RGB", (120, 80), "#d03020").save(buffer, "PNG")
+        embedded_cover = buffer.getvalue()
+    tags = ID3(incoming)
+    for frame in (
+        TIT2(encoding=3, text="Загруженный трек"),
+        TPE1(encoding=3, text="Исполнитель"),
+        TALB(encoding=3, text="Исходный альбом"),
+        TCOM(encoding=3, text="Композитор"),
+        USLT(encoding=3, lang="rus", desc="Lyrics", text="Текст песни"),
+        TXXX(encoding=3, desc="custom", text="extra metadata"),
+        WOAS(url="https://example.com/source"),
+        APIC(encoding=3, mime="image/png", type=3, desc="Original", data=embedded_cover),
+    ):
+        tags.add(frame)
+    if tag_version == 4:
+        tags.add(TDOR(encoding=3, text="2005-05-10"))
+    tags.save(incoming, v2_version=tag_version)
+    before = incoming.read_bytes()
+    frames = before[ID3(incoming).size :]
+    progress_messages = []
+
+    async def download(path):
+        shutil.copyfile(incoming, path)
+
+    async def progress(text):
+        progress_messages.append(text)
+
+    track = await media.ingest_mp3("abcdef123456", 7, 7, "incoming.mp3", download, progress)
+    assert (
+        track.title == "Загруженный трек"
+        and track.artist == "Исполнитель"
+        and track.album == "Исходный альбом"
+    )
+    assert track.url == "" and track.source_name == "source.mp3"
+    assert storage.get(track.id, 7) == track and storage.get(track.id, 8) is None
+    directory = storage.directory(track.id)
+    path = directory / "original.mp3"
+    assert path.read_bytes() == before
+    updated = replace(track, title="Исправленный трек", album="Исправленный альбом")
+    await media.edit_metadata(updated)
+    tags = ID3(path)
+    assert path.read_bytes()[tags.size :] == frames
+    assert MP3(path).info.bitrate == 128_000
+    assert (directory / "source.mp3").read_bytes() == before
+    assert tags["TIT2"].text == [updated.title] and tags["TALB"].text == [updated.album]
+    assert tags["TCOM"].text == ["Композитор"]
+    assert tags.getall("USLT")[0].text == "Текст песни"
+    assert tags["TXXX:custom"].text == ["extra metadata"]
+    assert tags["WOAS"].url == "https://example.com/source"
+    assert tags.getall("APIC")[0].data == embedded_cover
+    assert tags.version == (2, tag_version, 0)
+    if tag_version == 4:
+        assert str(tags["TDOR"].text[0]) == "2005-05-10"
+    assert progress_messages
+    await media.edit_metadata(updated, cover_action="rotate")
+    assert ID3(path).getall("APIC")[0].data == (directory / "cover.jpg").read_bytes()
+
+
+async def test_uploaded_mp3_without_id3_uses_filename_and_can_receive_tags(audio, tmp_path):
+    media, storage, original = audio
+    incoming = await media.render(original)
+    ID3(incoming).delete(incoming, delete_v1=True, delete_v2=True)
+
+    async def download(path):
+        shutil.copyfile(incoming, path)
+
+    async def progress(text):
+        pass
+
+    track = await media.ingest_mp3("abcdef123456", 1, 1, "../../Своя песня.MP3", download, progress)
+    assert track.title == "Своя песня" and track.album == "" and track.artist == "Неизвестный исполнитель"
+    updated = replace(track, album="Альбом")
+    await media.edit_metadata(updated)
+    tags = ID3(storage.directory(track.id) / "original.mp3")
+    assert tags["TALB"].text == ["Альбом"]
+    assert not tags.getall("APIC")  # A text edit preserves the absence of an embedded cover.
+
+
+@pytest.mark.parametrize("failure", ["broken", "duration", "download"])
+async def test_failed_mp3_import_removes_incomplete_files(audio, failure):
+    media, storage, original = audio
+    incoming = await media.render(original)
+    if failure == "duration":
+        media.settings.max_duration_seconds = 10
+
+    async def download(path):
+        if failure == "download":
+            path.write_bytes(b"partial")
+            raise UserError("Download interrupted")
+        if failure == "broken":
+            path.write_bytes(b"This is not an MP3")
+        else:
+            shutil.copyfile(incoming, path)
+
+    async def progress(text):
+        pass
+
+    with pytest.raises(InvalidMP3 if failure == "broken" else UserError):
+        await media.ingest_mp3("abcdef123456", 1, 1, "fake.mp3", download, progress)
+    assert not storage.directory("abcdef123456").exists()
+    assert storage.get("abcdef123456", 1) is None
+
+
+async def test_text_edit_preserves_cover_and_failed_image_leaves_all_assets_intact(audio):
+    media, storage, track = audio
+    await media.render(track)
+    directory = storage.directory(track.id)
+    cover = (directory / "cover.jpg").read_bytes()
+    await media.edit_metadata(replace(track, title="Новое название"))
+    assert (directory / "cover.jpg").read_bytes() == cover
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    with pytest.raises(UserError, match="изображение"):
+        await media.edit_metadata(track, raw=b"not an image")
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+async def test_cover_edit_rolls_back_if_publication_fails(audio, monkeypatch):
+    media, storage, track = audio
+    await media.render(track)
+    directory = storage.directory(track.id)
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    original_replace = os.replace
+
+    def fail_original_once(source, destination):
+        if destination == directory / "original.mp3":
+            raise OSError("Simulated disk failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("srtube.media.os.replace", fail_original_once)
+    with pytest.raises(OSError, match="disk failure"):
+        await media.edit_metadata(track, cover_action="rotate")
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+async def test_metadata_edit_checks_final_file_size_before_publishing(audio):
+    media, storage, track = audio
+    path = await media.render(track)
+    before = path.read_bytes()
+    media.settings.max_upload_bytes = len(before) - 1
+    with pytest.raises(UserError):
+        await media.edit_metadata(replace(track, title="Other title"))
+    assert path.read_bytes() == before
 
 
 async def test_slowed_duration_and_middle_voice_pitch(audio):

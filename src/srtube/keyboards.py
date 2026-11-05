@@ -11,6 +11,15 @@ class Action(CallbackData, prefix="fx"):
     reverb: int = 25
 
 
+class MetadataAction(CallbackData, prefix="meta"):
+    action: str
+    track: str
+
+
+def metadata_button(text: str, action: str, track: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=MetadataAction(action=action, track=track).pack())
+
+
 def button(text: str, action: str, track: str, effects: Effects) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=text,
@@ -23,7 +32,43 @@ def track_keyboard(track: str, effects: Effects | None = None) -> InlineKeyboard
         inline_keyboard=[
             [
                 button("🎛 Сделать slowed + reverb", "open", track, effects or Effects()),
-            ]
+            ],
+            [metadata_button("✏️ Редактировать метаданные", "open", track)],
+        ]
+    )
+
+
+def metadata_keyboard(track: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                metadata_button("🎤 Исполнитель", "artist", track),
+                metadata_button("🎵 Название", "title", track),
+            ],
+            [
+                metadata_button("💿 Альбом", "album", track),
+                metadata_button("🗑 Удалить альбом", "clear_album", track),
+            ],
+            [metadata_button("🖼 Загрузить обложку", "upload", track)],
+            [metadata_button("🎨 Редактировать обложку", "cover", track)],
+            [button("⬇️ Получить MP3", "original", track, Effects())],
+        ]
+    )
+
+
+def cover_keyboard(track: str) -> InlineKeyboardMarkup:
+    def edit(text: str, action: str) -> InlineKeyboardButton:
+        return metadata_button(text, action, track)
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [edit("⬜ Кадрирование / поля", "crop"), edit("↻ Повернуть", "rotate")],
+            [edit("− Масштаб", "zoom_out"), edit("+ Масштаб", "zoom_in")],
+            [edit("←", "left"), edit("↑", "up"), edit("↓", "down"), edit("→", "right")],
+            [edit("☀− Яркость", "darker"), edit("☀+ Яркость", "brighter")],
+            [edit("↩️ Сбросить правки обложки", "reset")],
+            [edit("🖼 Загрузить другую", "upload"), edit("✏️ Метаданные", "open")],
+            [button("⬇️ Получить MP3", "original", track, Effects())],
         ]
     )
 

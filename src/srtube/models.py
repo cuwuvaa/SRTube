@@ -6,6 +6,7 @@ from .errors import UserError
 from .security import SOURCE_NAME, TRACK_ID
 
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+YOUTUBE_MESSAGE = r"(?i)^(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)/"
 
 
 def youtube_url(text: str) -> str:
@@ -41,6 +42,13 @@ def youtube_url(text: str) -> str:
 
 def clean_text(value: object, limit: int = 180) -> str:
     return " ".join(str(value or "").split())[:limit].strip()
+
+
+def editable_text(text: str) -> str:
+    value = " ".join(text.split())
+    if not 1 <= len(value) <= 180 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise UserError("Введи от 1 до 180 символов без управляющих символов. /cancel — отменить ввод.")
+    return value
 
 
 def metadata(info: dict) -> tuple[str, str]:
@@ -105,6 +113,7 @@ class Track:
     duration: float
     source_name: str
     created_at: float
+    album: str = ""
 
     def __post_init__(self) -> None:
         import math

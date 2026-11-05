@@ -9,8 +9,9 @@ from pathlib import Path
 from aiohttp import web
 from pydantic import SecretStr
 
-from .artwork import make_artwork
+from .artwork import MAX_ARTWORK_BYTES, make_artwork
 from .config import Settings
+from .errors import InvalidArtwork, InvalidMP3, MP3TooLong
 from .media import Media
 from .models import Effects, Track
 from .security import SOURCE_NAME, media_file
@@ -70,7 +71,39 @@ async def application(settings: Settings) -> web.Application:
                         raise ValueError
                     path = await media.render(track, effects, preview)
                     return web.json_response({"file": path.name, "track": asdict(track)["id"]})
+                if operation == "metadata":
+                    track = Track(**payload["track"])
+                    upload = payload.get("upload", False)
+                    if track.id != directory.name or type(upload) is not bool:
+                        raise ValueError
+                    raw_path = media_file(directory, "artwork.upload")
+                    try:
+                        raw = None
+                        if upload:
+                            if not raw_path.is_file() or not 0 < raw_path.stat().st_size <= MAX_ARTWORK_BYTES:
+                                raise ValueError
+                            raw = raw_path.read_bytes()
+                        await media.edit_metadata(track, raw=raw, cover_action=payload.get("cover_action"))
+                    finally:
+                        raw_path.unlink(missing_ok=True)
+                    return web.json_response({"ok": True})
+                if operation == "import_mp3":
+                    track = await media.import_mp3(
+                        directory.name,
+                        payload["user_id"],
+                        payload["chat_id"],
+                        payload["filename"],
+                        duration_limit=payload["duration_limit"],
+                        byte_limit=payload["byte_limit"],
+                    )
+                    return web.json_response({"track": asdict(track)})
                 raise ValueError
+            except InvalidArtwork:
+                return web.json_response({"error": "invalid artwork"}, status=422)
+            except InvalidMP3:
+                return web.json_response({"error": "invalid mp3"}, status=422)
+            except MP3TooLong:
+                return web.json_response({"error": "mp3 too long"}, status=422)
             except (KeyError, TypeError, ValueError):
                 return web.json_response({"error": "invalid request"}, status=400)
             except Exception:

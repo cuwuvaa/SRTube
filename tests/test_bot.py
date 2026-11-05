@@ -1,26 +1,35 @@
 import asyncio
 import time
 from datetime import UTC, datetime
+from io import BytesIO
 
+import pytest
 import pytest_asyncio
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import (
     AnswerCallbackQuery,
+    EditMessageMedia,
     EditMessageText,
+    GetFile,
     SendAudio,
     SendChatAction,
     SendMessage,
+    SendPhoto,
     SendVoice,
 )
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import Audio, CallbackQuery, Chat, Document, File, Message, PhotoSize, Update, User
+from PIL import Image
 
 from srtube.admin import AdminAction
+from srtube.artwork import make_artwork
 from srtube.bot import build_dispatcher
 from srtube.config import Settings
+from srtube.errors import UserError
 from srtube.jobs import Jobs
-from srtube.keyboards import Action
+from srtube.keyboards import Action, MetadataAction
+from srtube.metadata_editor import MetadataInput, MP3Writer
 from srtube.models import Effects, Track
 from srtube.storage import Storage
 
@@ -30,6 +39,7 @@ class RecordingSession(BaseSession):
         super().__init__()
         self.requests = []
         self.uploads = []
+        self.download = b""
 
     async def close(self):
         pass
@@ -38,8 +48,13 @@ class RecordingSession(BaseSession):
         self.requests.append(method)
         if isinstance(method, (AnswerCallbackQuery, SendChatAction)):
             return True
+        if isinstance(method, GetFile):
+            return File(file_id=method.file_id, file_unique_id="cover", file_path="photos/cover")
         if isinstance(method, (SendAudio, SendVoice)):
             file = method.audio if isinstance(method, SendAudio) else method.voice
+            self.uploads.append((type(method), b"".join([chunk async for chunk in file.read(bot)])))
+        if isinstance(method, (SendPhoto, EditMessageMedia)):
+            file = method.photo if isinstance(method, SendPhoto) else method.media.media
             self.uploads.append((type(method), b"".join([chunk async for chunk in file.read(bot)])))
         return Message(
             message_id=len(self.requests) + 100,
@@ -49,7 +64,7 @@ class RecordingSession(BaseSession):
         ).as_(bot)
 
     async def stream_content(self, *args, **kwargs):
-        yield b""
+        yield self.download
 
 
 class FakeMedia:
@@ -58,13 +73,15 @@ class FakeMedia:
     def __init__(self, storage):
         self.storage = storage
         self.rendered = []
+        self.edited = []
 
     async def ingest(self, track_id, user_id, chat_id, url, progress):
         await progress("Готовлю MP3…")
         directory = self.storage.directory(track_id)
         directory.mkdir()
-        for name in ("source.webm", "original.mp3", "cover.jpg", "thumbnail.jpg"):
+        for name in ("source.webm", "original.mp3"):
             (directory / name).write_bytes(b"original")
+        make_artwork(None, directory)
         track = Track(
             track_id, user_id, chat_id, "Song <3", "Artist & Co", url, 60, "source.webm", time.time()
         )
@@ -77,8 +94,32 @@ class FakeMedia:
         path.write_bytes(b"preview" if preview else b"effects")
         return path
 
+    async def ingest_mp3(self, track_id, user_id, chat_id, filename, download, progress):
+        directory = self.storage.directory(track_id)
+        directory.mkdir()
+        await download(directory / "source.mp3")
+        (directory / "original.mp3").write_bytes((directory / "source.mp3").read_bytes())
+        make_artwork(None, directory)
+        track = Track(
+            track_id,
+            user_id,
+            chat_id,
+            "Uploaded song",
+            "Uploaded artist",
+            "",
+            60,
+            "source.mp3",
+            time.time(),
+            album="Uploaded album",
+        )
+        self.storage.save(track)
+        return track
+
     async def diagnose_youtube(self, url):
         return {"title": "Test <video>", "duration": 19}
+
+    async def edit_metadata(self, track, *, raw=None, cover_action=None):
+        self.edited.append((track, raw, cover_action))
 
 
 @pytest_asyncio.fixture
@@ -109,6 +150,23 @@ def user_message(text, user_id=1):
     )
 
 
+def mp3_message(kind="document", user_id=1, file_size=None):
+    kwargs = dict(
+        file_id="mp3-upload", file_unique_id="mp3-upload", file_name="track.MP3", file_size=file_size
+    )
+    file = Audio(**kwargs, duration=60, mime_type="audio/mpeg") if kind == "audio" else Document(**kwargs)
+    return user_message(None, user_id).model_copy(update={kind: file})
+
+
+def test_mp3_download_enforces_actual_bytes_when_telegram_size_is_missing(tmp_path):
+    path = tmp_path / "source.mp3"
+    with MP3Writer(path, limit=10) as stream:
+        stream.write(b"1234567")
+        with pytest.raises(UserError):
+            stream.write(b"8901")
+    assert path.read_bytes() == b"1234567"
+
+
 async def click(dp, bot, track, action, effects=None, user_id=1):
     effects = effects or Effects()
     query = CallbackQuery(
@@ -119,6 +177,268 @@ async def click(dp, bot, track, action, effects=None, user_id=1):
         data=Action(action=action, track=track.id, slowed=effects.slowed, reverb=effects.reverb).pack(),
     )
     await dp.feed_update(bot, Update(update_id=2, callback_query=query))
+
+
+async def metadata_click(dp, bot, track, action, user_id=1, photo=False):
+    message = user_message("panel", user_id)
+    if photo:
+        message = message.model_copy(
+            update={
+                "text": None,
+                "photo": [PhotoSize(file_id="cover", file_unique_id="cover", width=800, height=800)],
+            }
+        )
+    query = CallbackQuery(
+        id="metadata-callback",
+        chat_instance="test-chat",
+        from_user=user_message("", user_id).from_user,
+        message=message,
+        data=MetadataAction(action=action, track=track.id).pack(),
+    )
+    await dp.feed_update(bot, Update(update_id=20, callback_query=query))
+
+
+async def test_album_can_be_set_and_cleared(bot_env):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    await metadata_click(dp, bot, track, "album")
+    await dp.feed_update(bot, Update(update_id=3, message=user_message(" Альбом <3 & Co ")))
+    assert storage.get(track.id, 1).album == "Альбом <3 & Co"
+    assert "Альбом &lt;3 &amp; Co" in session.requests[-1].text
+    await click(dp, bot, track, "original")
+    audio = next(request for request in reversed(session.requests) if isinstance(request, SendAudio))
+    assert "Альбом &lt;3 &amp; Co" in audio.caption
+    await metadata_click(dp, bot, track, "clear_album")
+    assert storage.get(track.id, 1).album == ""
+    assert media.edited[-1][0].album == ""
+
+
+@pytest.mark.parametrize("kind", ["audio", "document"])
+async def test_received_mp3_opens_own_editor_and_returns_original_quality(bot_env, kind):
+    dp, bot, session, storage, media = bot_env
+    session.download = b"uploaded mp3 bytes"
+    await dp.feed_update(bot, Update(update_id=1, message=mp3_message(kind)))
+    track = storage.latest(1)
+    assert track is not None and track.url == "" and track.source_name == "source.mp3"
+    assert not session.uploads
+    panel = session.requests[-1]
+    assert isinstance(panel, EditMessageText)
+    assert "Uploaded song" in panel.text and "Uploaded album" in panel.text
+    assert any("Альбом" in button.text for row in panel.reply_markup.inline_keyboard for button in row)
+    await metadata_click(dp, bot, track, "album")
+    await dp.feed_update(bot, Update(update_id=3, message=user_message("Edited album")))
+    assert storage.get(track.id, 1).album == "Edited album"
+    await click(dp, bot, track, "original")
+    assert session.uploads[-1] == (SendAudio, session.download)
+    audio = next(request for request in reversed(session.requests) if isinstance(request, SendAudio))
+    assert "исходное качество" in audio.caption and "320" not in audio.caption
+    assert "Edited album" in audio.caption
+    assert not media.rendered
+
+
+@pytest.mark.parametrize("pending", ["title", "upload"])
+async def test_incoming_mp3_starts_new_editor_and_leaves_previous_track_unchanged(bot_env, pending):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    previous = storage.latest(1)
+    await metadata_click(dp, bot, previous, pending)
+    session.download = b"new mp3"
+    await dp.feed_update(bot, Update(update_id=3, message=mp3_message()))
+    latest = storage.latest(1)
+    assert latest.id != previous.id
+    assert storage.get(previous.id, 1) == previous
+    assert not media.edited
+    assert await dp.fsm.get_context(bot=bot, chat_id=1, user_id=1).get_state() is None
+
+
+async def test_mp3_upload_rejects_oversized_file_before_download_and_checks_access(bot_env):
+    dp, bot, session, storage, _ = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=mp3_message(file_size=20_000_001)))
+    assert "20 МБ" in session.requests[-1].text
+    assert not any(isinstance(request, GetFile) for request in session.requests)
+    assert storage.latest(1) is None
+    await dp.feed_update(bot, Update(update_id=2, message=mp3_message(user_id=2)))
+    assert "только приглашённым" in session.requests[-1].text
+    assert storage.latest(2) is None
+
+
+async def test_different_uploaded_files_keep_separate_editors(bot_env):
+    dp, bot, session, storage, _ = bot_env
+    session.download = b"first mp3"
+    await dp.feed_update(bot, Update(update_id=1, message=mp3_message()))
+    first = storage.latest(1)
+    session.download = b"second mp3"
+    await dp.feed_update(bot, Update(update_id=2, message=mp3_message()))
+    second = storage.latest(1)
+    assert first.id != second.id
+    await metadata_click(dp, bot, first, "title")
+    await dp.feed_update(bot, Update(update_id=3, message=user_message("First edited")))
+    assert storage.get(second.id, 1).title == second.title
+    await click(dp, bot, first, "original")
+    assert session.uploads[-1] == (SendAudio, b"first mp3")
+    await click(dp, bot, second, "original")
+    assert session.uploads[-1] == (SendAudio, b"second mp3")
+
+
+async def test_metadata_fields_persist_and_are_used_by_last_cache_and_effects(bot_env):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    audio = next(request for request in session.requests if isinstance(request, SendAudio))
+    assert any("метаданные" in button.text for row in audio.reply_markup.inline_keyboard for button in row)
+    await metadata_click(dp, bot, track, "open")
+    assert "Artist &amp; Co" in session.requests[-1].text
+    for field, value in (("artist", "Новый & Артист"), ("title", "  Новый <трек>  ")):
+        await metadata_click(dp, bot, track, field)
+        await dp.feed_update(bot, Update(update_id=3, message=user_message(value)))
+    updated = storage.get(track.id, 1)
+    assert updated.title == "Новый <трек>" and updated.artist == "Новый & Артист"
+    assert "Новый &lt;трек&gt;" in session.requests[-1].text
+    await dp.feed_update(bot, Update(update_id=4, message=user_message("/last")))
+    sent = [request for request in session.requests if isinstance(request, SendAudio)][-1]
+    assert sent.title == updated.title and sent.performer == updated.artist
+    await click(dp, bot, track, "render", Effects(20, 0))
+    sent = [request for request in session.requests if isinstance(request, SendAudio)][-1]
+    assert sent.title == "Новый <трек> (slowed 20% + reverb 0%)"
+    assert sent.performer == updated.artist
+    assert storage.cached_url(track.url, 1) == updated
+    assert not media.rendered[0][1]
+    reopened = Storage(storage.root)
+    try:
+        assert reopened.get(track.id, 1) == updated
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("kind", ["photo", "document"])
+async def test_upload_cover_and_edit_preview(bot_env, kind):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    await metadata_click(dp, bot, track, "upload")
+    with BytesIO() as buffer:
+        Image.new("RGB", (80, 60), "red").save(buffer, "PNG")
+        session.download = buffer.getvalue()
+    message = user_message(None)
+    if kind == "photo":
+        data = {"photo": [PhotoSize(file_id="upload", file_unique_id="upload", width=80, height=60)]}
+    else:
+        data = {"document": Document(file_id="upload", file_unique_id="upload", file_name="cover.png")}
+    await dp.feed_update(bot, Update(update_id=2, message=message.model_copy(update=data)))
+    assert media.edited[-1][1] == session.download
+    assert session.uploads[-1][0] == SendPhoto
+    await metadata_click(dp, bot, track, "rotate", photo=True)
+    assert media.edited[-1][2] == "rotate"
+    assert session.uploads[-1][0] == EditMessageMedia
+    assert await dp.fsm.get_context(bot=bot, chat_id=1, user_id=1).get_state() is None
+
+
+async def test_metadata_rejects_other_owner_expired_track_and_revoked_access(bot_env):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    storage.add_users({2}, 1)
+    await metadata_click(dp, bot, track, "title", user_id=2)
+    assert session.requests[-1].show_alert
+    assert not media.edited
+    await dp.feed_update(bot, Update(update_id=2, message=user_message("https://youtu.be/BaW_jenozKc", 2)))
+    owned = storage.latest(2)
+    await metadata_click(dp, bot, owned, "artist", user_id=2)
+    storage.remove_users({2})
+    await dp.feed_update(bot, Update(update_id=3, message=user_message("Forbidden", 2)))
+    assert storage.get(owned.id, 2).artist == owned.artist
+    assert not media.edited
+    storage.remove(track.id)
+    await metadata_click(dp, bot, track, "cover")
+    assert session.requests[-1].show_alert and "кэше" in session.requests[-1].text
+
+
+async def test_invalid_metadata_and_failed_cover_allow_retry(bot_env, monkeypatch):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    context = dp.fsm.get_context(bot=bot, chat_id=1, user_id=1)
+    await metadata_click(dp, bot, track, "title")
+    for value in ("  ", "a" * 181):
+        await dp.feed_update(bot, Update(update_id=2, message=user_message(value)))
+    assert not media.edited and storage.get(track.id, 1) == track
+    assert await context.get_state() == MetadataInput.text.state
+    await metadata_click(dp, bot, track, "upload")
+
+    async def invalid_image(*args, **kwargs):
+        raise UserError("Некорректное изображение")
+
+    monkeypatch.setattr(media, "edit_metadata", invalid_image)
+    session.download = b"invalid image"
+    message = user_message(None).model_copy(
+        update={"document": Document(file_id="upload", file_unique_id="upload", file_name="cover.png")}
+    )
+    await dp.feed_update(bot, Update(update_id=3, message=message))
+    assert "Некорректное изображение" in session.requests[-1].text
+    assert await context.get_state() == MetadataInput.cover.state
+    assert storage.get(track.id, 1) == track
+
+
+async def test_cancel_and_new_url_exit_metadata_input(bot_env):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    await metadata_click(dp, bot, track, "title")
+    await dp.feed_update(bot, Update(update_id=2, message=user_message("/cancel")))
+    assert await dp.fsm.get_context(bot=bot, chat_id=1, user_id=1).get_state() is None
+    await metadata_click(dp, bot, track, "upload")
+    await dp.feed_update(bot, Update(update_id=3, message=user_message("https://youtu.be/jNQXAC9IVRw")))
+    assert storage.latest(1).id != track.id
+    assert not media.edited
+
+
+async def test_metadata_edit_blocks_duplicate_job(bot_env, monkeypatch):
+    dp, bot, session, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def delayed_edit(*args, **kwargs):
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(media, "edit_metadata", delayed_edit)
+    await metadata_click(dp, bot, track, "title")
+    task = asyncio.create_task(dp.feed_update(bot, Update(update_id=3, message=user_message("Updated"))))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await click(dp, bot, track, "render")
+    assert "уже обрабатывается" in session.requests[-1].text
+    finish.set()
+    await task
+    assert storage.get(track.id, 1).title == "Updated"
+
+
+async def test_shutdown_finishes_metadata_publication_before_closing_storage(bot_env, monkeypatch):
+    dp, bot, _, storage, media = bot_env
+    await dp.feed_update(bot, Update(update_id=1, message=user_message("https://youtu.be/BaW_jenozKc")))
+    track = storage.latest(1)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def delayed_edit(*args, **kwargs):
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(media, "edit_metadata", delayed_edit)
+    await metadata_click(dp, bot, track, "title")
+    task = asyncio.create_task(
+        dp.feed_update(bot, Update(update_id=3, message=user_message("Saved on shutdown")))
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    shutdown = asyncio.create_task(dp.emit_shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    finish.set()
+    await asyncio.wait_for(shutdown, timeout=2)
+    assert task.cancelled()
+    assert storage.get(track.id, 1).title == "Saved on shutdown"
 
 
 async def test_full_bot_flow_with_custom_percentages_and_voice(bot_env):
