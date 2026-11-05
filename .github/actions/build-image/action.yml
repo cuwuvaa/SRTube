@@ -22,6 +22,32 @@ runs:
       shell: bash
       run: |
         docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 128m srtube:ci python -c 'import ctypes, shutil, sqlite3; assert sqlite3.sqlite_version_info == (3, 54, 1), "Update the SQLite pin and review advisories"; assert shutil.which("sqlite3") is None, "Remove SQLite CVE exception: CLI is installed"; assert not hasattr(ctypes.CDLL("libsqlite3.so.0"), "sqlite3_recover_init"), "Remove SQLite CVE exception: recovery API is present"'
+    - name: Install checksum-pinned Grype with download retries
+      shell: bash
+      run: |
+        case "$(uname -m)" in
+          x86_64)
+            release_arch=amd64
+            tool_arch=x64
+            expected=bc3ea3f9e6fd56ac781c08c6c5e614271b79f438200757f6932085c19b0a4657
+            ;;
+          aarch64)
+            release_arch=arm64
+            tool_arch=arm64
+            expected=33670612aad351c48cf3c37f4a85d8b043d1b64b21e6034e675bb00b956d78c1
+            ;;
+          *) echo "Unsupported Grype architecture" >&2; exit 1 ;;
+        esac
+        archive="$RUNNER_TEMP/grype-0.121.1-$release_arch.tar.gz"
+        curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 120 \
+          "https://github.com/anchore/grype/releases/download/v0.121.1/grype_0.121.1_linux_$release_arch.tar.gz" -o "$archive"
+        printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+        tool_dir="$RUNNER_TOOL_CACHE/grype/0.121.1/$tool_arch"
+        mkdir -p "$tool_dir"
+        tar -xzf "$archive" -C "$tool_dir" grype
+        chmod 755 "$tool_dir/grype"
+        "$tool_dir/grype" version
+        touch "$tool_dir.complete"
     - uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
       with:
         config: .grype.yaml
