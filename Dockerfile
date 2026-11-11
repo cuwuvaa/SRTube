@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
-FROM python:3.12-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8 AS audio
+FROM python:3.15-alpine3.24@sha256:a0f2e268f2ce8f3709611a90054ec6a8ae31f6251f5896b8648b9bb99835e30a AS audio
 WORKDIR /build
 RUN apk upgrade --no-cache && apk add --no-cache build-base pkgconf nasm curl gnupg xz tar lame-dev opus-dev
 # Signed upstream source, pinned hash and release-key fingerprint. Only audio parsers are built.
@@ -27,7 +27,7 @@ RUN ./configure --prefix=/opt/audio --disable-everything --disable-autodetect \
       --extra-ldflags='-Wl,-z,relro,-z,now -Wl,-z,noexecstack' \
     && make -j2 && make install \
     && mkdir -p /opt/audio/licenses && cp COPYING.LGPLv2.1 /opt/audio/licenses/
-FROM python:3.12-alpine3.24@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
+FROM python:3.15-alpine3.24@sha256:a0f2e268f2ce8f3709611a90054ec6a8ae31f6251f5896b8648b9bb99835e30a
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 ARG REVISION=local
